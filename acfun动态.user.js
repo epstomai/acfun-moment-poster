@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.25
+// @version      0.8.26
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -749,19 +749,23 @@
 
     function findMomentCard(link, momentId) {
         let node = link.parentElement;
+        let fallback = null;
         let depth = 0;
-        while (node && node !== document.body && depth < 12) {
+        while (node && node !== document.body && depth < 20) {
             if (node.nodeType === 1 && !node.closest('#amp-inline-host')) {
                 const rect = node.getBoundingClientRect();
                 if ((rect.width >= 260 || node.clientWidth >= 260) && (rect.height >= 60 || node.clientHeight >= 60)) {
                     const ids = momentIdsInNode(node);
-                    if (ids.size === 1 && ids.has(momentId)) return node;
+                    if (ids.size === 1 && ids.has(momentId)) {
+                        if (node.querySelector('.feed-more')) return node;
+                        if (!fallback) fallback = node;
+                    }
                 }
             }
             node = node.parentElement;
             depth++;
         }
-        return link.parentElement;
+        return fallback || link.parentElement;
     }
 
     function currentUserId() {
@@ -770,25 +774,109 @@
 
     function userIdFromUrl(url) {
         if (!url) return '';
-        const match = String(url).match(/\/(?:u|upPage)\/(\d+)(?:[/?#]|$)/);
+        const match = String(url).match(/\/(?:u|upPage)\/(\d+)(?:\.aspx)?(?:[/?#]|$)/);
         return match ? match[1] : '';
+    }
+
+    function normalizeId(value) {
+        if (value == null) return '';
+        const textValue = String(value);
+        return /^\d{4,}$/.test(textValue) ? textValue : '';
+    }
+
+    function collectIdsFromObject(root, keys, maxDepth) {
+        const ids = new Set();
+        const seen = new WeakSet();
+        const queue = [{ value: root, depth: 0 }];
+        const keySet = new Set(keys);
+        while (queue.length && ids.size < 20) {
+            const current = queue.shift();
+            const value = current.value;
+            if (!value || typeof value !== 'object') continue;
+            if (value === window || value === document || value.nodeType) continue;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            let names = [];
+            try { names = Object.keys(value); } catch (e) { continue; }
+            names.forEach((name) => {
+                let child;
+                try { child = value[name]; } catch (e) { return; }
+                if (keySet.has(name)) {
+                    const id = normalizeId(child);
+                    if (id) ids.add(id);
+                }
+                if (current.depth < maxDepth && child && typeof child === 'object') {
+                    queue.push({ value: child, depth: current.depth + 1 });
+                }
+            });
+        }
+        return ids;
+    }
+
+    function vueObjectsFromNode(node) {
+        const objects = [];
+        let current = node;
+        let depth = 0;
+        while (current && current !== document.body && depth < 10) {
+            if (current.__vue__) {
+                objects.push(current.__vue__);
+                if (current.__vue__.$props) objects.push(current.__vue__.$props);
+                if (current.__vue__.$data) objects.push(current.__vue__.$data);
+            }
+            current = current.parentElement;
+            depth++;
+        }
+        return objects;
+    }
+
+    function idsFromVueNode(node, keys) {
+        const ids = new Set();
+        vueObjectsFromNode(node).forEach((obj) => {
+            collectIdsFromObject(obj, keys, 5).forEach((id) => ids.add(id));
+        });
+        return ids;
     }
 
     function isOwnMomentCard(card) {
         const uid = currentUserId();
         if (!uid || !card || !card.querySelectorAll) return false;
-        const attrs = ['userId', 'uid', 'authorId', 'authorUid'];
-        const attrMatched = [card].concat(Array.from(card.querySelectorAll('[data-user-id],[data-uid],[data-author-id],[data-author-uid]'))).some((node) => {
+        const attrs = ['userId', 'userid', 'uid', 'authorId', 'authorid', 'authorUid', 'authoruid', 'upId', 'upid'];
+        const attrMatched = [card].concat(Array.from(card.querySelectorAll('[data-user-id],[data-userid],[data-uid],[data-author-id],[data-authorid],[data-author-uid],[data-authoruid],[data-up-id],[data-upid]'))).some((node) => {
             return attrs.some((name) => String(node.dataset && node.dataset[name] || '') === uid);
         });
         if (attrMatched) return true;
         const links = Array.from(card.querySelectorAll('a[href*="/u/"],a[href*="/upPage/"]'));
-        return links.some((link) => userIdFromUrl(link.href || link.getAttribute('href')) === uid);
+        if (links.some((link) => userIdFromUrl(link.href || link.getAttribute('href')) === uid)) return true;
+        const authorKeys = ['authorId', 'authorUid', 'ownerId', 'upId', 'userId', 'uid'];
+        return idsFromVueNode(card, authorKeys).has(uid);
     }
 
     function findNativeFeedMore(card) {
         if (!card || !card.querySelector) return null;
         return card.querySelector('.feed-more');
+    }
+
+    function findMomentCardFromFeedMore(more) {
+        let node = more && more.parentElement;
+        let depth = 0;
+        let fallback = null;
+        while (node && node !== document.body && depth < 20) {
+            if (node.nodeType === 1 && !node.closest('#amp-inline-host')) {
+                const ids = momentIdsInNode(node);
+                if (ids.size === 1) {
+                    return { card: node, momentId: Array.from(ids)[0] };
+                }
+                if (!fallback) {
+                    const vueMomentIds = idsFromVueNode(node, ['momentId', 'resourceId']);
+                    if (vueMomentIds.size === 1) {
+                        fallback = { card: node, momentId: Array.from(vueMomentIds)[0] };
+                    }
+                }
+            }
+            node = node.parentElement;
+            depth++;
+        }
+        return fallback;
     }
 
     function showGlobalMessage(type, textValue) {
@@ -832,6 +920,7 @@
             deleteFeedMoment(momentId, card, item);
         });
         menu.appendChild(item);
+        more.dataset.ampDeleteState = 'injected';
         return true;
     }
 
@@ -847,13 +936,16 @@
     }
 
     function attachMomentDeleteMenu(card, momentId) {
-        if (!card || !momentId || card.dataset.ampMomentDeleteReady === momentId) return;
+        if (!card || !momentId) return;
         if (!isOwnMomentCard(card)) return;
         const more = findNativeFeedMore(card);
         if (!more) return;
-        card.dataset.ampMomentDeleteReady = momentId;
+        if (more.dataset.ampMomentDeleteReady === momentId) return;
+        more.dataset.ampMomentDeleteReady = momentId;
+        more.dataset.ampDeleteState = 'bound';
         more.addEventListener('click', (ev) => {
             if (ev.target.closest('.amp-feed-delete')) return;
+            more.dataset.ampDeleteState = 'scheduled';
             scheduleInjectNativeDeleteItem(more, card, momentId);
         });
     }
@@ -1442,7 +1534,21 @@
 
     document.addEventListener('click', (ev) => {
         if (!ev.target.closest('#amp-emoji-head')) closeEmojiPackagePopover();
-    });
+        const more = ev.target.closest('.feed-more');
+        if (more && !more.closest('#amp-inline-host') && !more.closest('#amp-square-panel')) {
+            const found = findMomentCardFromFeedMore(more);
+            if (!found) {
+                more.dataset.ampDeleteState = 'no-card';
+                return;
+            }
+            if (!isOwnMomentCard(found.card)) {
+                more.dataset.ampDeleteState = 'not-own';
+                return;
+            }
+            more.dataset.ampDeleteState = 'scheduled';
+            scheduleInjectNativeDeleteItem(more, found.card, found.momentId);
+        }
+    }, true);
     document.addEventListener('keydown', (ev) => {
         if (ev.key === 'Escape' && imagePreviewMask.classList.contains('show')) {
             hideImagePreview();
