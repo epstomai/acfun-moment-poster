@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.27
+// @version      0.8.28
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -806,7 +806,7 @@
             if (seen.has(value)) continue;
             seen.add(value);
             let names = [];
-            try { names = Object.keys(value); } catch (e) { continue; }
+            try { names = Reflect.ownKeys(value).filter((name) => typeof name === 'string'); } catch (e) { continue; }
             names.forEach((name) => {
                 let child;
                 try { child = value[name]; } catch (e) { return; }
@@ -903,6 +903,30 @@
             depth++;
         }
         return fallback;
+    }
+
+    function findMomentCardByGeometry(more) {
+        if (!more || !more.getBoundingClientRect) return null;
+        const moreRect = more.getBoundingClientRect();
+        const links = Array.from(document.querySelectorAll('a[href*="communityCircle/moment/"],[data-href*="communityCircle/moment/"],[data-url*="communityCircle/moment/"],[data-share-url*="communityCircle/moment/"]'))
+            .filter((link) => !link.closest('#amp-inline-host') && !link.closest('#amp-square-panel'));
+        let best = null;
+        links.forEach((link) => {
+            const momentId = momentIdFromUrl(momentUrlFromElement(link));
+            if (!momentId) return;
+            const card = findMomentCard(link, momentId);
+            if (!card || !card.getBoundingClientRect) return;
+            const rect = card.getBoundingClientRect();
+            if (rect.width < 180 || rect.height < 40) return;
+            const verticalOverlap = moreRect.bottom >= rect.top - 12 && moreRect.top <= rect.bottom + 12;
+            const horizontalNear = moreRect.left >= rect.left - 48 && moreRect.right <= rect.right + 96;
+            if (!verticalOverlap || !horizontalNear) return;
+            const score = Math.abs((moreRect.top + moreRect.bottom) / 2 - (rect.top + rect.bottom) / 2)
+                + Math.max(0, moreRect.left - rect.right)
+                + Math.max(0, rect.left - moreRect.right);
+            if (!best || score < best.score) best = { card: card, momentId: momentId, score: score };
+        });
+        return best && { card: best.card, momentId: best.momentId };
     }
 
     function showGlobalMessage(type, textValue) {
@@ -1562,9 +1586,13 @@
         if (!ev.target.closest('#amp-emoji-head')) closeEmojiPackagePopover();
         const more = ev.target.closest('.feed-more');
         if (more && !more.closest('#amp-inline-host') && !more.closest('#amp-square-panel')) {
-            const found = findMomentCardFromFeedMore(more);
+            let found = findMomentCardFromFeedMore(more);
             if (!found) {
-                more.dataset.ampDeleteState = 'no-card';
+                more.dataset.ampDeleteState = 'no-card-dom';
+                found = findMomentCardByGeometry(more);
+            }
+            if (!found) {
+                more.dataset.ampDeleteState = 'no-card-geometry';
                 return;
             }
             if (!isOwnMomentCard(found.card)) {
