@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.28
+// @version      0.8.29
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -11,6 +11,7 @@
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @connect      id.app.acfun.cn
 // @connect      api-ipv6.app.acfun.cn
 // @connect      api.app.acfun.cn
@@ -59,6 +60,8 @@
     const EMOTION_CACHE_TTL = 6 * 60 * 60 * 1000;
     const RECENT_EMOTION_KEY = 'acfun_moment_recent_emotions_v1';
     const RECENT_EMOTION_LIMIT = 12;
+    const FEED_DATA_LIMIT = 200;
+    const capturedFeedItems = [];
 
     // ====== 小工具 ======
     function uuid() {
@@ -141,9 +144,96 @@
         });
     }
 
+    function installFeedDataCapture() {
+        const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        if (pageWindow.__ampFeedDataCaptureInstalled) return;
+        pageWindow.__ampFeedDataCaptureInstalled = true;
+
+        if (pageWindow.fetch) {
+            const rawFetch = pageWindow.fetch;
+            pageWindow.fetch = function () {
+                const promise = rawFetch.apply(this, arguments);
+                promise.then((response) => {
+                    try {
+                        response.clone().text().then(rememberFeedDataFromText).catch(() => {});
+                    } catch (e) { /* 忽略不可 clone 的响应 */ }
+                }).catch(() => {});
+                return promise;
+            };
+        }
+
+        if (pageWindow.XMLHttpRequest && pageWindow.XMLHttpRequest.prototype) {
+            const proto = pageWindow.XMLHttpRequest.prototype;
+            const rawOpen = proto.open;
+            proto.open = function () {
+                this.addEventListener('load', function () {
+                    try { rememberFeedDataFromText(this.responseText); } catch (e) { /* 忽略非文本响应 */ }
+                });
+                return rawOpen.apply(this, arguments);
+            };
+        }
+    }
+
     function parseJSON(r, label) {
         try { return JSON.parse(r.responseText); }
         catch (e) { throw new Error(label + '响应解析失败: ' + String(r.responseText).slice(0, 120)); }
+    }
+
+    function extractMomentIdFromObject(obj) {
+        if (!obj || typeof obj !== 'object') return '';
+        const moment = obj.moment || obj.momentInfo || obj.resource || {};
+        return normalizeId(moment.momentId)
+            || normalizeId(obj.momentId)
+            || (String(obj.resourceType || '') === '10' ? normalizeId(obj.resourceId) : '')
+            || normalizeId(moment.resourceId);
+    }
+
+    function extractUserIdFromObject(obj) {
+        if (!obj || typeof obj !== 'object') return '';
+        const user = obj.user || obj.userInfo || obj.author || obj.owner || (obj.moment && obj.moment.user) || {};
+        return normalizeId(user.userId)
+            || normalizeId(user.id)
+            || normalizeId(user.uid)
+            || normalizeId(obj.userId)
+            || normalizeId(obj.authorId)
+            || normalizeId(obj.upId)
+            || normalizeId(obj.uid);
+    }
+
+    function rememberFeedDataFromJson(root) {
+        const seen = new WeakSet();
+        const queue = [{ value: root, depth: 0 }];
+        while (queue.length) {
+            const current = queue.shift();
+            const value = current.value;
+            if (!value || typeof value !== 'object') continue;
+            if (seen.has(value)) continue;
+            seen.add(value);
+            const momentId = extractMomentIdFromObject(value);
+            if (momentId) {
+                const userId = extractUserIdFromObject(value);
+                capturedFeedItems.push({ momentId: momentId, userId: userId, ts: Date.now() });
+                while (capturedFeedItems.length > FEED_DATA_LIMIT) capturedFeedItems.shift();
+                document.documentElement.dataset.acfunMomentCapturedFeeds = String(capturedFeedItems.length);
+            }
+            if (current.depth >= 8) continue;
+            if (Array.isArray(value)) {
+                value.forEach((item) => queue.push({ value: item, depth: current.depth + 1 }));
+            } else {
+                let names = [];
+                try { names = Object.keys(value); } catch (e) { names = []; }
+                names.forEach((name) => {
+                    const child = value[name];
+                    if (child && typeof child === 'object') queue.push({ value: child, depth: current.depth + 1 });
+                });
+            }
+        }
+    }
+
+    function rememberFeedDataFromText(textValue) {
+        if (!textValue || typeof textValue !== 'string') return;
+        if (!/(momentId|resourceId|feed|moment)/.test(textValue)) return;
+        try { rememberFeedDataFromJson(JSON.parse(textValue)); } catch (e) { /* 忽略非 JSON 响应 */ }
     }
 
     function escapeHTML(value) {
@@ -266,6 +356,8 @@
     }
 
     // ====== 鉴权 ======
+    installFeedDataCapture();
+
     async function getAccessToken() {
         const r = await gm({
             method: 'POST', url: TOKEN_URL,
@@ -927,6 +1019,19 @@
             if (!best || score < best.score) best = { card: card, momentId: momentId, score: score };
         });
         return best && { card: best.card, momentId: best.momentId };
+    }
+
+    function findMomentCardFromCapturedData(more) {
+        const uid = currentUserId();
+        if (!more || !capturedFeedItems.length) return null;
+        const feedMores = Array.from(document.querySelectorAll('.feed-more'))
+            .filter((item) => !item.closest('#amp-inline-host') && !item.closest('#amp-square-panel') && item.querySelector('.ac-icon'));
+        const index = feedMores.indexOf(more);
+        const ownItems = uid ? capturedFeedItems.filter((item) => !item.userId || item.userId === uid) : capturedFeedItems.slice();
+        const source = ownItems.length ? ownItems : capturedFeedItems;
+        const data = source[index] || source[source.length - 1];
+        if (!data || !data.momentId) return null;
+        return { card: more.closest('[data-v-1a13993a]') || more.parentElement || more, momentId: data.momentId, userId: data.userId };
     }
 
     function showGlobalMessage(type, textValue) {
@@ -1593,9 +1698,17 @@
             }
             if (!found) {
                 more.dataset.ampDeleteState = 'no-card-geometry';
+                found = findMomentCardFromCapturedData(more);
+            }
+            if (!found) {
+                more.dataset.ampDeleteState = 'no-card-captured';
                 return;
             }
-            if (!isOwnMomentCard(found.card)) {
+            if (found.userId && currentUserId() && found.userId !== currentUserId()) {
+                more.dataset.ampDeleteState = 'not-own-captured';
+                return;
+            }
+            if (!found.userId && !isOwnMomentCard(found.card)) {
                 more.dataset.ampDeleteState = 'not-own';
                 return;
             }
