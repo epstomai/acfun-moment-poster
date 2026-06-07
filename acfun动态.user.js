@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.29
+// @version      0.8.30
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
 // @match        https://www.acfun.cn/member/*
 // @updateURL    http://127.0.0.1:8787/acfun%E5%8A%A8%E6%80%81.user.js
 // @downloadURL  http://127.0.0.1:8787/acfun%E5%8A%A8%E6%80%81.user.js
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
 // @grant        unsafeWindow
@@ -1154,9 +1154,6 @@
     const squareState = squarePanel.querySelector('#amp-square-state');
     const squareList = squarePanel.querySelector('#amp-square-list');
 
-    mountFloatingComposer();
-    mountSquarePanelForPage();
-
     // 已选图片：{file, objectURL, width, height}
     let picked = [];
     let emotionPackages = null;
@@ -1726,18 +1723,27 @@
         }
     });
 
-    scanMomentCards(document);
-    const feedObserver = new MutationObserver((mutations) => {
-        for (let i = 0; i < mutations.length; i++) {
-            if (mutations[i].addedNodes && mutations[i].addedNodes.length) {
-                scheduleScanMomentCards(document);
-                scheduleMountMemberSquareEntry();
-                return;
-            }
+    function startWhenBodyReady() {
+        if (!document.body) {
+            window.setTimeout(startWhenBodyReady, 30);
+            return;
         }
-    });
-    feedObserver.observe(document.body, { childList: true, subtree: true });
-    if (!isMemberPage()) window.setTimeout(() => loadSquareFeed(true), 300);
+        mountFloatingComposer();
+        mountSquarePanelForPage();
+        scanMomentCards(document);
+        const feedObserver = new MutationObserver((mutations) => {
+            for (let i = 0; i < mutations.length; i++) {
+                if (mutations[i].addedNodes && mutations[i].addedNodes.length) {
+                    scheduleScanMomentCards(document);
+                    scheduleMountMemberSquareEntry();
+                    return;
+                }
+            }
+        });
+        feedObserver.observe(document.body, { childList: true, subtree: true });
+        if (!isMemberPage()) window.setTimeout(() => loadSquareFeed(true), 300);
+    }
+    startWhenBodyReady();
 
     send.addEventListener('click', async () => {
         const content = serializeEditorContent();
