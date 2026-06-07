@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.23
+// @version      0.8.24
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -520,11 +520,9 @@
         #amp-actions{display:flex;align-items:center;gap:8px;}
         #amp-send{background:#fd4c5d;color:#fff;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;font-size:14px;}
         #amp-send:disabled{background:#f7a9b1;cursor:not-allowed;}
-        .amp-feed-menu-wrap{position:absolute;right:10px;top:10px;z-index:30;}
-        .amp-feed-more{width:30px;height:30px;border:1px solid #ddd;border-radius:6px;background:#fff;color:#666;cursor:pointer;
-            font-size:18px;line-height:26px;padding:0;}
-        .amp-feed-more:hover,.amp-feed-more.active{border-color:#fd4c5d;color:#fd4c5d;background:#fff5f6;}
-        .amp-feed-menu{display:none;position:absolute;right:0;top:34px;z-index:31;min-width:108px;padding:4px;background:#fff;
+        .feed-more.amp-feed-more-host{position:relative;}
+        .feed-more.amp-feed-more-host.active{color:#fd4c5d;}
+        .amp-feed-menu{display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:31;min-width:108px;padding:4px;background:#fff;
             border:1px solid #eee;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.14);}
         .amp-feed-menu.open{display:block;}
         .amp-feed-delete{width:100%;border:none;border-radius:6px;background:#fff;color:#d9363e;padding:7px 10px;cursor:pointer;
@@ -777,9 +775,36 @@
         document.querySelectorAll('.amp-feed-menu.open').forEach((menu) => {
             if (except && menu === except) return;
             menu.classList.remove('open');
-            const more = menu.parentElement && menu.parentElement.querySelector('.amp-feed-more');
+            const more = menu.parentElement;
             if (more) more.classList.remove('active');
         });
+    }
+
+    function currentUserId() {
+        return getCookie('auth_key') || getCookie('userId') || getCookie('uid') || '';
+    }
+
+    function userIdFromUrl(url) {
+        if (!url) return '';
+        const match = String(url).match(/\/(?:u|upPage)\/(\d+)(?:[/?#]|$)/);
+        return match ? match[1] : '';
+    }
+
+    function isOwnMomentCard(card) {
+        const uid = currentUserId();
+        if (!uid || !card || !card.querySelectorAll) return false;
+        const attrs = ['userId', 'uid', 'authorId', 'authorUid'];
+        const attrMatched = [card].concat(Array.from(card.querySelectorAll('[data-user-id],[data-uid],[data-author-id],[data-author-uid]'))).some((node) => {
+            return attrs.some((name) => String(node.dataset && node.dataset[name] || '') === uid);
+        });
+        if (attrMatched) return true;
+        const links = Array.from(card.querySelectorAll('a[href*="/u/"],a[href*="/upPage/"]'));
+        return links.some((link) => userIdFromUrl(link.href || link.getAttribute('href')) === uid);
+    }
+
+    function findNativeFeedMore(card) {
+        if (!card || !card.querySelector) return null;
+        return card.querySelector('.feed-more');
     }
 
     function showGlobalMessage(type, textValue) {
@@ -813,30 +838,27 @@
 
     function attachMomentDeleteMenu(card, momentId) {
         if (!card || !momentId || card.dataset.ampMomentDeleteReady === momentId) return;
+        if (!isOwnMomentCard(card)) return;
+        const more = findNativeFeedMore(card);
+        if (!more) return;
         card.dataset.ampMomentDeleteReady = momentId;
-        if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
 
-        const wrap = document.createElement('div');
-        wrap.className = 'amp-feed-menu-wrap';
-        wrap.innerHTML = `
-            <button class="amp-feed-more" type="button" title="更多">...</button>
-            <div class="amp-feed-menu">
-                <button class="amp-feed-delete" type="button">删除</button>
-            </div>
-        `;
-        card.appendChild(wrap);
-
-        const more = wrap.querySelector('.amp-feed-more');
-        const menu = wrap.querySelector('.amp-feed-menu');
-        const del = wrap.querySelector('.amp-feed-delete');
+        more.classList.add('amp-feed-more-host');
+        if (getComputedStyle(more).position === 'static') more.style.position = 'relative';
+        const menu = document.createElement('div');
+        menu.className = 'amp-feed-menu';
+        menu.innerHTML = '<button class="amp-feed-delete" type="button">删除</button>';
+        more.appendChild(menu);
+        const del = menu.querySelector('.amp-feed-delete');
         more.addEventListener('click', (ev) => {
+            if (ev.target.closest('.amp-feed-menu')) return;
             ev.preventDefault();
-            ev.stopPropagation();
+            ev.stopImmediatePropagation();
             const willOpen = !menu.classList.contains('open');
             closeFeedMenus(menu);
             menu.classList.toggle('open', willOpen);
             more.classList.toggle('active', willOpen);
-        });
+        }, true);
         del.addEventListener('click', (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
@@ -1428,7 +1450,7 @@
 
     document.addEventListener('click', (ev) => {
         if (!ev.target.closest('#amp-emoji-head')) closeEmojiPackagePopover();
-        if (ev.target.closest('.amp-feed-menu-wrap')) return;
+        if (ev.target.closest('.feed-more.amp-feed-more-host')) return;
         closeFeedMenus();
     });
     document.addEventListener('keydown', (ev) => {
