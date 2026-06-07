@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.24
+// @version      0.8.25
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -520,15 +520,9 @@
         #amp-actions{display:flex;align-items:center;gap:8px;}
         #amp-send{background:#fd4c5d;color:#fff;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;font-size:14px;}
         #amp-send:disabled{background:#f7a9b1;cursor:not-allowed;}
-        .feed-more.amp-feed-more-host{position:relative;}
-        .feed-more.amp-feed-more-host.active{color:#fd4c5d;}
-        .amp-feed-menu{display:none;position:absolute;right:0;top:calc(100% + 4px);z-index:31;min-width:108px;padding:4px;background:#fff;
-            border:1px solid #eee;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.14);}
-        .amp-feed-menu.open{display:block;}
-        .amp-feed-delete{width:100%;border:none;border-radius:6px;background:#fff;color:#d9363e;padding:7px 10px;cursor:pointer;
-            font-size:13px;text-align:left;}
-        .amp-feed-delete:hover{background:#fff5f6;}
-        .amp-feed-delete:disabled{color:#d99;cursor:not-allowed;}
+        .feed-more-menu .amp-feed-delete{color:#d9363e!important;cursor:pointer;}
+        .feed-more-menu .amp-feed-delete:hover{background:#fff5f6;}
+        .feed-more-menu .amp-feed-delete.disabled{color:#d99!important;cursor:not-allowed;}
         .amp-feed-deleting{opacity:.58;transition:opacity .15s ease;}
         #amp-square-nav-item{cursor:pointer;text-decoration:none;}
         #amp-msg{margin-top:8px;font-size:12px;min-height:16px;}
@@ -657,7 +651,6 @@
         const main = document.querySelector('.ac-member-main');
         if (!navEle || !main) return false;
 
-        closeFeedMenus();
         activateMemberSquareNav(navEle, navItem);
         main.innerHTML = '';
         squarePanel.classList.add('amp-member-square');
@@ -771,15 +764,6 @@
         return link.parentElement;
     }
 
-    function closeFeedMenus(except) {
-        document.querySelectorAll('.amp-feed-menu.open').forEach((menu) => {
-            if (except && menu === except) return;
-            menu.classList.remove('open');
-            const more = menu.parentElement;
-            if (more) more.classList.remove('active');
-        });
-    }
-
     function currentUserId() {
         return getCookie('auth_key') || getCookie('userId') || getCookie('uid') || '';
     }
@@ -812,13 +796,12 @@
         msg.textContent = textValue || '';
     }
 
-    async function deleteFeedMoment(momentId, card, button) {
+    async function deleteFeedMoment(momentId, card, item) {
         if (!momentId) return;
         if (!window.confirm('确认删除动态 ' + momentId + '？')) return;
-        closeFeedMenus();
-        const oldText = button.textContent;
-        button.disabled = true;
-        button.textContent = '删除中';
+        const oldText = item.textContent;
+        item.classList.add('disabled');
+        item.textContent = '删除中';
         card.classList.add('amp-feed-deleting');
         showGlobalMessage('info', '删除动态 ' + momentId + ' 中…');
         try {
@@ -831,9 +814,36 @@
             showGlobalMessage('err', e.message);
             window.alert(e.message);
         } finally {
-            button.disabled = false;
-            button.textContent = oldText;
+            item.classList.remove('disabled');
+            item.textContent = oldText;
         }
+    }
+
+    function injectNativeDeleteItem(more, card, momentId) {
+        const menu = more.querySelector('.feed-more-menu');
+        if (!menu || menu.querySelector('.amp-feed-delete')) return false;
+        const item = document.createElement('li');
+        item.className = 'amp-feed-delete';
+        item.textContent = '删除';
+        item.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (item.classList.contains('disabled')) return;
+            deleteFeedMoment(momentId, card, item);
+        });
+        menu.appendChild(item);
+        return true;
+    }
+
+    function scheduleInjectNativeDeleteItem(more, card, momentId) {
+        window.setTimeout(() => {
+            if (injectNativeDeleteItem(more, card, momentId)) return;
+            const observer = new MutationObserver(() => {
+                if (injectNativeDeleteItem(more, card, momentId)) observer.disconnect();
+            });
+            observer.observe(more, { childList: true, subtree: true });
+            window.setTimeout(() => observer.disconnect(), 1500);
+        }, 0);
     }
 
     function attachMomentDeleteMenu(card, momentId) {
@@ -842,27 +852,9 @@
         const more = findNativeFeedMore(card);
         if (!more) return;
         card.dataset.ampMomentDeleteReady = momentId;
-
-        more.classList.add('amp-feed-more-host');
-        if (getComputedStyle(more).position === 'static') more.style.position = 'relative';
-        const menu = document.createElement('div');
-        menu.className = 'amp-feed-menu';
-        menu.innerHTML = '<button class="amp-feed-delete" type="button">删除</button>';
-        more.appendChild(menu);
-        const del = menu.querySelector('.amp-feed-delete');
         more.addEventListener('click', (ev) => {
-            if (ev.target.closest('.amp-feed-menu')) return;
-            ev.preventDefault();
-            ev.stopImmediatePropagation();
-            const willOpen = !menu.classList.contains('open');
-            closeFeedMenus(menu);
-            menu.classList.toggle('open', willOpen);
-            more.classList.toggle('active', willOpen);
-        }, true);
-        del.addEventListener('click', (ev) => {
-            ev.preventDefault();
-            ev.stopPropagation();
-            deleteFeedMoment(momentId, card, del);
+            if (ev.target.closest('.amp-feed-delete')) return;
+            scheduleInjectNativeDeleteItem(more, card, momentId);
         });
     }
 
@@ -1450,8 +1442,6 @@
 
     document.addEventListener('click', (ev) => {
         if (!ev.target.closest('#amp-emoji-head')) closeEmojiPackagePopover();
-        if (ev.target.closest('.feed-more.amp-feed-more-host')) return;
-        closeFeedMenus();
     });
     document.addEventListener('keydown', (ev) => {
         if (ev.key === 'Escape' && imagePreviewMask.classList.contains('show')) {
