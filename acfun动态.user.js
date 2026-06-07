@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.22
+// @version      0.8.23
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -475,7 +475,7 @@
         #amp-emoji-package-button img{width:26px;height:26px;object-fit:contain;display:block;}
         #amp-emoji-package-name{min-width:0;color:#333;font-size:13px;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
         #amp-emoji-package-arrow{color:#999;font-size:12px;line-height:1;}
-        #amp-emoji-package-popover{display:none;margin:8px 8px 0;padding:10px;border:1px solid #eee;
+        #amp-emoji-package-popover{display:none;margin:8px;padding:10px;border:1px solid #eee;
             border-radius:8px;background:#fff;box-shadow:0 8px 22px rgba(0,0,0,.12);grid-template-columns:repeat(auto-fill,minmax(108px,1fr));gap:8px;}
         #amp-emoji-package-popover.open{display:grid;}
         #amp-emoji-body.package-picker-open #amp-emoji-recent,
