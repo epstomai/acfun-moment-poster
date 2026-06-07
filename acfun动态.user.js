@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.21
+// @version      0.8.22
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -506,11 +506,16 @@
         #amp-emoji-state.show{display:block;}
         #amp-thumbs{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
         .amp-thumb{position:relative;width:64px;height:64px;border-radius:6px;overflow:hidden;border:1px solid #eee;}
-        .amp-thumb img{width:100%;height:100%;object-fit:cover;display:block;}
+        .amp-thumb img{width:100%;height:100%;object-fit:cover;display:block;cursor:zoom-in;}
         .amp-thumb .amp-del{position:absolute;right:2px;top:2px;width:18px;height:18px;border:none;border-radius:50%;
             background:rgba(0,0,0,.55);color:#fff;cursor:pointer;font-size:12px;line-height:18px;padding:0;}
         .amp-add-img{width:64px;height:64px;border:1px dashed #ccc;border-radius:6px;background:#fafafa;color:#999;
             cursor:pointer;font-size:24px;line-height:64px;text-align:center;}
+        #amp-image-preview-mask{display:none;position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,.68);
+            align-items:center;justify-content:center;padding:24px;box-sizing:border-box;cursor:zoom-out;}
+        #amp-image-preview-mask.show{display:flex;}
+        #amp-image-preview-mask img{max-width:calc(100vw - 48px);max-height:calc(100vh - 48px);object-fit:contain;
+            border-radius:8px;background:#fff;box-shadow:0 12px 36px rgba(0,0,0,.32);cursor:default;}
         #amp-bar{display:flex;align-items:center;justify-content:flex-end;margin-top:12px;}
         #amp-actions{display:flex;align-items:center;gap:8px;}
         #amp-send{background:#fd4c5d;color:#fff;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;font-size:14px;}
@@ -692,6 +697,7 @@
         if (modalMask.parentNode !== document.body) document.body.appendChild(modalMask);
         if (inlineHost.parentNode !== document.body) document.body.appendChild(inlineHost);
         if (emojiPreview.parentNode !== document.body) document.body.appendChild(emojiPreview);
+        if (imagePreviewMask.parentNode !== document.body) document.body.appendChild(imagePreviewMask);
     }
 
     function pinComposerPanelPosition() {
@@ -877,6 +883,10 @@
     emojiPreview.innerHTML = '<img alt=""><div id="amp-emoji-preview-name"></div>';
     const emojiPreviewImg = emojiPreview.querySelector('img');
     const emojiPreviewName = emojiPreview.querySelector('#amp-emoji-preview-name');
+    const imagePreviewMask = document.createElement('div');
+    imagePreviewMask.id = 'amp-image-preview-mask';
+    imagePreviewMask.innerHTML = '<img alt="图片预览">';
+    const imagePreviewImg = imagePreviewMask.querySelector('img');
     const visibleInputs = Array.from(panel.querySelectorAll('input[name="amp-visible"]'));
     const squareRefresh = squarePanel.querySelector('#amp-square-refresh');
     const squareMore = squarePanel.querySelector('#amp-square-more');
@@ -1004,7 +1014,7 @@
         picked.forEach((p, idx) => {
             const d = document.createElement('div');
             d.className = 'amp-thumb';
-            d.innerHTML = `<img src="${p.objectURL}"><button class="amp-del" data-i="${idx}" title="移除">×</button>`;
+            d.innerHTML = `<img src="${p.objectURL}" data-i="${idx}" title="预览图片"><button class="amp-del" data-i="${idx}" title="移除">×</button>`;
             thumbs.appendChild(d);
         });
         if (picked.length < MAX_IMGS) {
@@ -1016,13 +1026,27 @@
             thumbs.appendChild(add);
         }
         thumbs.querySelectorAll('.amp-del').forEach((b) => {
-            b.addEventListener('click', () => {
+            b.addEventListener('click', (ev) => {
+                ev.stopPropagation();
                 const i = Number(b.dataset.i);
+                if (!picked[i]) return;
                 URL.revokeObjectURL(picked[i].objectURL);
                 picked.splice(i, 1);
                 renderThumbs();
             });
         });
+    }
+
+    function showImagePreview(index) {
+        const item = picked[index];
+        if (!item) return;
+        imagePreviewImg.src = item.objectURL;
+        imagePreviewMask.classList.add('show');
+    }
+
+    function hideImagePreview() {
+        imagePreviewMask.classList.remove('show');
+        imagePreviewImg.removeAttribute('src');
     }
 
     function currentVisibleForFans() {
@@ -1337,6 +1361,14 @@
     });
     squareRefresh.addEventListener('click', () => loadSquareFeed(true));
     squareMore.addEventListener('click', () => loadSquareFeed(false));
+    thumbs.addEventListener('click', (ev) => {
+        const img = ev.target.closest('.amp-thumb img');
+        if (!img) return;
+        showImagePreview(Number(img.dataset.i));
+    });
+    imagePreviewMask.addEventListener('click', (ev) => {
+        if (ev.target === imagePreviewMask) hideImagePreview();
+    });
 
     emojiToggle.addEventListener('click', async () => {
         const willOpen = !emojiPanel.classList.contains('open');
@@ -1400,6 +1432,10 @@
         closeFeedMenus();
     });
     document.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' && imagePreviewMask.classList.contains('show')) {
+            hideImagePreview();
+            return;
+        }
         if (ev.key === 'Escape' && inlineHost.classList.contains('amp-open')) {
             closeComposerModal();
         }
