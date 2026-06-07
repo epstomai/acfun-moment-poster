@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.26
+// @version      0.8.27
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
@@ -747,6 +747,15 @@
         return ids;
     }
 
+    function momentIdsInText(textValue) {
+        const ids = new Set();
+        String(textValue || '').replace(/communityCircle\/moment\/(\d+)/g, (all, id) => {
+            if (id) ids.add(id);
+            return all;
+        });
+        return ids;
+    }
+
     function findMomentCard(link, momentId) {
         let node = link.parentElement;
         let fallback = null;
@@ -817,11 +826,22 @@
         const objects = [];
         let current = node;
         let depth = 0;
-        while (current && current !== document.body && depth < 10) {
+        while (current && current !== document.body && depth < 20) {
             if (current.__vue__) {
                 objects.push(current.__vue__);
                 if (current.__vue__.$props) objects.push(current.__vue__.$props);
                 if (current.__vue__.$data) objects.push(current.__vue__.$data);
+            }
+            if (current.__vueParentComponent) {
+                objects.push(current.__vueParentComponent);
+                if (current.__vueParentComponent.props) objects.push(current.__vueParentComponent.props);
+                if (current.__vueParentComponent.data) objects.push(current.__vueParentComponent.data);
+                if (current.__vueParentComponent.setupState) objects.push(current.__vueParentComponent.setupState);
+                if (current.__vueParentComponent.ctx) objects.push(current.__vueParentComponent.ctx);
+            }
+            if (current.__vnode) {
+                objects.push(current.__vnode);
+                if (current.__vnode.props) objects.push(current.__vnode.props);
             }
             current = current.parentElement;
             depth++;
@@ -845,7 +865,7 @@
             return attrs.some((name) => String(node.dataset && node.dataset[name] || '') === uid);
         });
         if (attrMatched) return true;
-        const links = Array.from(card.querySelectorAll('a[href*="/u/"],a[href*="/upPage/"]'));
+        const links = Array.from(card.querySelectorAll('a[href*="/u/"],a[href*="/upPage/"],a[href*="acfun.cn/u/"],a[href*="acfun.cn/upPage/"]'));
         if (links.some((link) => userIdFromUrl(link.href || link.getAttribute('href')) === uid)) return true;
         const authorKeys = ['authorId', 'authorUid', 'ownerId', 'upId', 'userId', 'uid'];
         return idsFromVueNode(card, authorKeys).has(uid);
@@ -860,7 +880,7 @@
         let node = more && more.parentElement;
         let depth = 0;
         let fallback = null;
-        while (node && node !== document.body && depth < 20) {
+        while (node && node !== document.body && depth < 30) {
             if (node.nodeType === 1 && !node.closest('#amp-inline-host')) {
                 const ids = momentIdsInNode(node);
                 if (ids.size === 1) {
@@ -870,6 +890,12 @@
                     const vueMomentIds = idsFromVueNode(node, ['momentId', 'resourceId']);
                     if (vueMomentIds.size === 1) {
                         fallback = { card: node, momentId: Array.from(vueMomentIds)[0] };
+                    }
+                }
+                if (!fallback && depth >= 2) {
+                    const htmlIds = momentIdsInText(node.outerHTML);
+                    if (htmlIds.size === 1) {
+                        fallback = { card: node, momentId: Array.from(htmlIds)[0] };
                     }
                 }
             }
