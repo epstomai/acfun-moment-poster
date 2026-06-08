@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.30
+// @version      0.8.39
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @match        https://www.acfun.cn/member
 // @match        https://www.acfun.cn/member/*
+// @match        https://www.acfun.cn/moment/am*
 // @updateURL    http://127.0.0.1:8787/acfun%E5%8A%A8%E6%80%81.user.js
 // @downloadURL  http://127.0.0.1:8787/acfun%E5%8A%A8%E6%80%81.user.js
 // @run-at       document-start
@@ -48,7 +49,6 @@
     const API_BASE = 'https://api-ipv6.app.acfun.cn';
     const MOMENT_URL = API_BASE + '/rest/app/moment/add';
     const DELETE_MOMENT_URL = API_BASE + '/rest/app/moment/delete';
-    const SQUARE_FEED_URL = API_BASE + '/rest/app/feed/feedSquareV3';
     const IMG_GET_TOKEN_URL = API_BASE + '/rest/app/image/upload/getToken';
     const IMG_GET_URL_URL = API_BASE + '/rest/app/image/upload/getUrlAfterUpload';
     const EMOTION_URL = 'https://www.acfun.cn/rest/pc-direct/emotion/getUserEmotion';
@@ -60,9 +60,6 @@
     const EMOTION_CACHE_TTL = 6 * 60 * 60 * 1000;
     const RECENT_EMOTION_KEY = 'acfun_moment_recent_emotions_v1';
     const RECENT_EMOTION_LIMIT = 12;
-    const FEED_DATA_LIMIT = 200;
-    const capturedFeedItems = [];
-
     // ====== 小工具 ======
     function uuid() {
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
@@ -111,22 +108,6 @@
         }).toString();
     }
 
-    function deviceParams(at, extras) {
-        const params = new URLSearchParams({
-            market: DEVICE.market,
-            app_version: DEVICE.app_version,
-            product: DEVICE.product,
-            sys_version: DEVICE.sys_version,
-            egid: getGid(),
-            origin: DEVICE.origin,
-            sys_name: DEVICE.sys_name,
-            resolution: DEVICE.resolution,
-            access_token: at,
-        });
-        Object.keys(extras || {}).forEach((key) => params.set(key, extras[key]));
-        return params.toString();
-    }
-
     function gm(opts) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -144,106 +125,15 @@
         });
     }
 
-    function installFeedDataCapture() {
-        const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-        if (pageWindow.__ampFeedDataCaptureInstalled) return;
-        pageWindow.__ampFeedDataCaptureInstalled = true;
-
-        if (pageWindow.fetch) {
-            const rawFetch = pageWindow.fetch;
-            pageWindow.fetch = function () {
-                const promise = rawFetch.apply(this, arguments);
-                promise.then((response) => {
-                    try {
-                        response.clone().text().then(rememberFeedDataFromText).catch(() => {});
-                    } catch (e) { /* 忽略不可 clone 的响应 */ }
-                }).catch(() => {});
-                return promise;
-            };
-        }
-
-        if (pageWindow.XMLHttpRequest && pageWindow.XMLHttpRequest.prototype) {
-            const proto = pageWindow.XMLHttpRequest.prototype;
-            const rawOpen = proto.open;
-            proto.open = function () {
-                this.addEventListener('load', function () {
-                    try { rememberFeedDataFromText(this.responseText); } catch (e) { /* 忽略非文本响应 */ }
-                });
-                return rawOpen.apply(this, arguments);
-            };
-        }
-    }
-
     function parseJSON(r, label) {
         try { return JSON.parse(r.responseText); }
         catch (e) { throw new Error(label + '响应解析失败: ' + String(r.responseText).slice(0, 120)); }
-    }
-
-    function extractMomentIdFromObject(obj) {
-        if (!obj || typeof obj !== 'object') return '';
-        const moment = obj.moment || obj.momentInfo || obj.resource || {};
-        return normalizeId(moment.momentId)
-            || normalizeId(obj.momentId)
-            || (String(obj.resourceType || '') === '10' ? normalizeId(obj.resourceId) : '')
-            || normalizeId(moment.resourceId);
-    }
-
-    function extractUserIdFromObject(obj) {
-        if (!obj || typeof obj !== 'object') return '';
-        const user = obj.user || obj.userInfo || obj.author || obj.owner || (obj.moment && obj.moment.user) || {};
-        return normalizeId(user.userId)
-            || normalizeId(user.id)
-            || normalizeId(user.uid)
-            || normalizeId(obj.userId)
-            || normalizeId(obj.authorId)
-            || normalizeId(obj.upId)
-            || normalizeId(obj.uid);
-    }
-
-    function rememberFeedDataFromJson(root) {
-        const seen = new WeakSet();
-        const queue = [{ value: root, depth: 0 }];
-        while (queue.length) {
-            const current = queue.shift();
-            const value = current.value;
-            if (!value || typeof value !== 'object') continue;
-            if (seen.has(value)) continue;
-            seen.add(value);
-            const momentId = extractMomentIdFromObject(value);
-            if (momentId) {
-                const userId = extractUserIdFromObject(value);
-                capturedFeedItems.push({ momentId: momentId, userId: userId, ts: Date.now() });
-                while (capturedFeedItems.length > FEED_DATA_LIMIT) capturedFeedItems.shift();
-                document.documentElement.dataset.acfunMomentCapturedFeeds = String(capturedFeedItems.length);
-            }
-            if (current.depth >= 8) continue;
-            if (Array.isArray(value)) {
-                value.forEach((item) => queue.push({ value: item, depth: current.depth + 1 }));
-            } else {
-                let names = [];
-                try { names = Object.keys(value); } catch (e) { names = []; }
-                names.forEach((name) => {
-                    const child = value[name];
-                    if (child && typeof child === 'object') queue.push({ value: child, depth: current.depth + 1 });
-                });
-            }
-        }
-    }
-
-    function rememberFeedDataFromText(textValue) {
-        if (!textValue || typeof textValue !== 'string') return;
-        if (!/(momentId|resourceId|feed|moment)/.test(textValue)) return;
-        try { rememberFeedDataFromJson(JSON.parse(textValue)); } catch (e) { /* 忽略非 JSON 响应 */ }
     }
 
     function escapeHTML(value) {
         return String(value == null ? '' : value).replace(/[&<>"']/g, function (ch) {
             return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch];
         });
-    }
-
-    function escapeAttr(value) {
-        return escapeHTML(value).replace(/`/g, '&#96;');
     }
 
     function normalizeImageUrl(url) {
@@ -356,7 +246,6 @@
     }
 
     // ====== 鉴权 ======
-    installFeedDataCapture();
 
     async function getAccessToken() {
         const r = await gm({
@@ -489,21 +378,6 @@
         return j;
     }
 
-    async function fetchSquareFeed(at, pcursor) {
-        const r = await gm({
-            method: 'GET',
-            url: SQUARE_FEED_URL + '?' + deviceParams(at, {
-                count: '20',
-                pcursor: pcursor || '',
-            }),
-            headers: appHeaders(at),
-            timeout: 60000,
-        });
-        const j = parseJSON(r, '广场动态');
-        if (j.result !== 0) throw new Error('广场动态加载失败(' + j.result + ')：' + (j.error_msg || JSON.stringify(j).slice(0, 160)));
-        return j;
-    }
-
     // ====== UI ======
     GM_addStyle(`
         #amp-inline-host{position:fixed;right:24px;bottom:24px;z-index:9999;box-sizing:border-box;width:auto;max-width:calc(100vw - 32px);
@@ -511,38 +385,16 @@
         #amp-float-toggle{display:flex;align-items:center;justify-content:center;width:54px;height:54px;border:none;border-radius:50%;
             background:#fd4c5d;color:#fff;box-shadow:0 8px 24px rgba(253,76,93,.32);cursor:pointer;font-size:24px;line-height:1;}
         #amp-float-toggle:hover{background:#f23b4e;}
+        .amp-detail-delete{display:inline-flex;align-items:center;justify-content:center;min-width:28px;height:49px;margin:0 0 0 34px;
+            border:none;background:transparent;color:#999;cursor:pointer;font:inherit;font-size:12px;line-height:1;text-decoration:none;vertical-align:middle;padding:0;}
+        .amp-detail-delete:hover{color:#d9363e;text-decoration:none;}
+        .amp-detail-delete:disabled{color:#bbb;cursor:not-allowed;}
         #amp-modal-mask{display:none;position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,.28);}
         #amp-modal-mask.amp-open{display:block;}
         #amp-panel{display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:9999;box-sizing:border-box;
             width:760px;max-width:calc(100vw - 32px);max-height:calc(100vh - 24px);overflow:auto;background:#fff;
             border:1px solid #eee;border-radius:8px;box-shadow:0 10px 32px rgba(0,0,0,.16);padding:14px 16px;font-size:14px;color:#222;font-family:inherit;}
         #amp-inline-host.amp-open #amp-panel{display:block;}
-        #amp-square-panel{box-sizing:border-box;width:100%;margin-top:12px;background:#fff;border:1px solid #eee;border-radius:8px;
-            box-shadow:0 1px 2px rgba(0,0,0,.03);font-size:14px;color:#222;font-family:inherit;overflow:hidden;}
-        #amp-square-panel.amp-member-square{box-shadow:none;}
-        #amp-square-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid #eee;}
-        #amp-square-title{font-weight:600;font-size:15px;}
-        #amp-square-actions{display:flex;align-items:center;gap:8px;}
-        #amp-square-refresh,#amp-square-more{border:1px solid #ddd;border-radius:8px;background:#fff;color:#444;padding:7px 12px;
-            cursor:pointer;font-size:13px;}
-        #amp-square-refresh:hover,#amp-square-more:hover{border-color:#fd4c5d;color:#fd4c5d;background:#fff5f6;}
-        #amp-square-refresh:disabled,#amp-square-more:disabled{color:#aaa;border-color:#eee;background:#fafafa;cursor:not-allowed;}
-        #amp-square-list{display:flex;flex-direction:column;}
-        #amp-square-state{padding:14px 16px;color:#888;font-size:13px;}
-        .amp-square-card{position:relative;padding:14px 16px;border-bottom:1px solid #f1f1f1;background:#fff;}
-        .amp-square-card:last-child{border-bottom:none;}
-        .amp-square-author{font-weight:600;color:#333;font-size:14px;line-height:1.4;}
-        .amp-square-time{margin-left:8px;color:#999;font-size:12px;font-weight:400;}
-        .amp-square-text{margin-top:8px;color:#333;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;}
-        .amp-inline-emotion{width:42px;height:42px;object-fit:contain;vertical-align:middle;margin:0 2px;}
-        .amp-square-link{color:inherit;text-decoration:none;}
-        .amp-square-link:hover{color:#fd4c5d;}
-        .amp-square-imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(84px,1fr));gap:6px;max-width:360px;margin-top:10px;}
-        .amp-square-imgs img{width:100%;aspect-ratio:1;border-radius:6px;object-fit:cover;background:#f6f6f6;display:block;}
-        .amp-square-meta{display:flex;gap:8px;margin-top:10px;color:#999;font-size:12px;flex-wrap:wrap;}
-        .amp-square-action{display:inline-flex;align-items:center;justify-content:center;min-width:58px;height:28px;padding:0 10px;
-            border:1px solid #eee;border-radius:6px;background:#fff;color:#666;text-decoration:none;box-sizing:border-box;}
-        .amp-square-action:hover{border-color:#fd4c5d;color:#fd4c5d;background:#fff5f6;text-decoration:none;}
         #amp-text{width:100%;min-height:96px;box-sizing:border-box;border:1px solid #ddd;border-radius:8px;
             padding:10px;font-size:14px;line-height:1.6;outline:none;white-space:pre-wrap;word-break:break-word;overflow:auto;}
         #amp-text:empty:before{content:attr(data-placeholder);color:#aaa;pointer-events:none;}
@@ -612,11 +464,6 @@
         #amp-actions{display:flex;align-items:center;gap:8px;}
         #amp-send{background:#fd4c5d;color:#fff;border:none;border-radius:8px;padding:8px 18px;cursor:pointer;font-size:14px;}
         #amp-send:disabled{background:#f7a9b1;cursor:not-allowed;}
-        .feed-more-menu .amp-feed-delete{color:#d9363e!important;cursor:pointer;}
-        .feed-more-menu .amp-feed-delete:hover{background:#fff5f6;}
-        .feed-more-menu .amp-feed-delete.disabled{color:#d99!important;cursor:not-allowed;}
-        .amp-feed-deleting{opacity:.58;transition:opacity .15s ease;}
-        #amp-square-nav-item{cursor:pointer;text-decoration:none;}
         #amp-msg{margin-top:8px;font-size:12px;min-height:16px;}
         #amp-msg.ok{color:#23a35a;} #amp-msg.err{color:#fd4c5d;} #amp-msg.info{color:#888;}
         @media (max-width:640px){
@@ -624,9 +471,6 @@
             #amp-panel{width:calc(100vw - 24px);padding:12px;}
             #amp-emoji-package-button{min-width:0;max-width:none;width:100%;}
             #amp-emoji-package-popover{grid-template-columns:repeat(auto-fill,minmax(96px,1fr));}
-            #amp-square-head{align-items:flex-start;flex-direction:column;}
-            #amp-square-actions{width:100%;justify-content:flex-end;}
-            .amp-square-card{padding:12px;}
             #amp-text{min-height:84px;}
             #amp-bar{align-items:flex-end;gap:8px;flex-direction:column;}
             #amp-actions{width:100%;justify-content:flex-end;}
@@ -686,99 +530,18 @@
     inlineHost.appendChild(panel);
     inlineHost.appendChild(floatToggle);
 
-    const squarePanel = document.createElement('div');
-    squarePanel.id = 'amp-square-panel';
-    squarePanel.innerHTML = `
-        <div id="amp-square-head">
-            <div id="amp-square-title">广场动态</div>
-            <div id="amp-square-actions">
-                <button id="amp-square-refresh" type="button">刷新</button>
-                <button id="amp-square-more" type="button" disabled>加载更多</button>
-            </div>
-        </div>
-        <div id="amp-square-state">点击刷新查看广场动态</div>
-        <div id="amp-square-list"></div>
-    `;
-
-    function isMemberPage() {
-        return /^\/member(?:\/|$)/.test(location.pathname);
+    function detailMomentIdFromLocation() {
+        const match = location.pathname.match(/^\/moment\/am(\d+)(?:\/|$)/);
+        return match ? match[1] : '';
     }
 
-    function mountSquarePanelInline() {
-        squarePanel.classList.remove('amp-member-square');
-        if (squarePanel.parentNode !== inlineHost) inlineHost.appendChild(squarePanel);
-    }
-
-    function insertMemberNavItem(navEle, navItem) {
-        const items = Array.from(navEle.querySelectorAll('.ac-member-navigation-item'));
-        const followItem = items.find((item) => /关注动态/.test(item.textContent || ''));
-        if (followItem) {
-            const holder = followItem.closest('.ac-member-navigation-item-wrap,.ac-member-navigation-group,li') || followItem;
-            if (holder && holder.parentNode) {
-                holder.insertAdjacentElement('afterend', navItem);
-                return;
-            }
-        }
-        const historyItem = items.find((item) => /历史记录/.test(item.textContent || ''));
-        if (historyItem && historyItem.parentNode) {
-            historyItem.insertAdjacentElement('beforebegin', navItem);
-            return;
-        }
-        navEle.appendChild(navItem);
-    }
-
-    function activateMemberSquareNav(navEle, navItem) {
-        navEle.querySelectorAll('.router-link-exact-active,.router-link-active,.ac-member-navigation-item-active').forEach((item) => {
-            if (item === navItem) return;
-            item.classList.remove('router-link-exact-active');
-            item.classList.remove('router-link-active');
-            item.classList.remove('ac-member-navigation-item-active');
-        });
-        navItem.classList.add('router-link-exact-active');
-        navItem.classList.add('ac-member-navigation-item-active');
-    }
-
-    function openMemberSquarePage(navItem) {
-        const navEle = document.querySelector('.ac-member-navigation');
-        const main = document.querySelector('.ac-member-main');
-        if (!navEle || !main) return false;
-
-        activateMemberSquareNav(navEle, navItem);
-        main.innerHTML = '';
-        squarePanel.classList.add('amp-member-square');
-        main.appendChild(squarePanel);
-
-        if (!squareList.children.length && !squareLoading) loadSquareFeed(true);
-        return true;
-    }
-
-    function mountMemberSquareEntry() {
-        if (!isMemberPage()) return false;
-        const navEle = document.querySelector('.ac-member-navigation');
-        if (!navEle) return false;
-        if (squarePanel.parentNode === inlineHost) squarePanel.remove();
-        const existing = navEle.querySelector('#amp-square-nav-item');
-        if (existing) existing.remove();
-        return false;
-    }
-
-    function scheduleMountMemberSquareEntry() {
-        if (!isMemberPage()) return;
-        window.clearTimeout(scheduleMountMemberSquareEntry.timer);
-        scheduleMountMemberSquareEntry.timer = window.setTimeout(mountMemberSquareEntry, 180);
-    }
-
-    function mountSquarePanelForPage() {
-        if (isMemberPage()) {
-            mountMemberSquareEntry();
-            return;
-        }
-        mountSquarePanelInline();
+    function isMomentDetailPage() {
+        return !!detailMomentIdFromLocation();
     }
 
     function mountFloatingComposer() {
         if (modalMask.parentNode !== document.body) document.body.appendChild(modalMask);
-        if (inlineHost.parentNode !== document.body) document.body.appendChild(inlineHost);
+        if (!isMomentDetailPage() && inlineHost.parentNode !== document.body) document.body.appendChild(inlineHost);
         if (emojiPreview.parentNode !== document.body) document.body.appendChild(emojiPreview);
         if (imagePreviewMask.parentNode !== document.body) document.body.appendChild(imagePreviewMask);
     }
@@ -812,314 +575,121 @@
         if (open) text.focus();
     }
 
-    function momentIdFromUrl(url) {
-        if (!url) return '';
-        const decoded = String(url).replace(/\\\//g, '/');
-        const match = decoded.match(/communityCircle\/moment\/(\d+)/);
-        return match ? match[1] : '';
-    }
-
-    function momentUrlFromElement(el) {
-        if (!el) return '';
-        return el.href
-            || el.getAttribute('href')
-            || el.getAttribute('data-href')
-            || el.getAttribute('data-url')
-            || el.getAttribute('data-share-url')
-            || '';
-    }
-
-    function momentIdsInNode(node) {
-        const ids = new Set();
-        if (!node || !node.querySelectorAll) return ids;
-        node.querySelectorAll('a[href*="communityCircle/moment/"],[data-href*="communityCircle/moment/"],[data-url*="communityCircle/moment/"],[data-share-url*="communityCircle/moment/"]').forEach((link) => {
-            const id = momentIdFromUrl(momentUrlFromElement(link));
-            if (id) ids.add(id);
-        });
-        return ids;
-    }
-
-    function momentIdsInText(textValue) {
-        const ids = new Set();
-        String(textValue || '').replace(/communityCircle\/moment\/(\d+)/g, (all, id) => {
-            if (id) ids.add(id);
-            return all;
-        });
-        return ids;
-    }
-
-    function findMomentCard(link, momentId) {
-        let node = link.parentElement;
-        let fallback = null;
-        let depth = 0;
-        while (node && node !== document.body && depth < 20) {
-            if (node.nodeType === 1 && !node.closest('#amp-inline-host')) {
-                const rect = node.getBoundingClientRect();
-                if ((rect.width >= 260 || node.clientWidth >= 260) && (rect.height >= 60 || node.clientHeight >= 60)) {
-                    const ids = momentIdsInNode(node);
-                    if (ids.size === 1 && ids.has(momentId)) {
-                        if (node.querySelector('.feed-more')) return node;
-                        if (!fallback) fallback = node;
-                    }
-                }
-            }
-            node = node.parentElement;
-            depth++;
-        }
-        return fallback || link.parentElement;
-    }
-
-    function currentUserId() {
-        return getCookie('auth_key') || getCookie('userId') || getCookie('uid') || '';
-    }
-
-    function userIdFromUrl(url) {
-        if (!url) return '';
-        const match = String(url).match(/\/(?:u|upPage)\/(\d+)(?:\.aspx)?(?:[/?#]|$)/);
-        return match ? match[1] : '';
-    }
-
-    function normalizeId(value) {
-        if (value == null) return '';
-        const textValue = String(value);
-        return /^\d{4,}$/.test(textValue) ? textValue : '';
-    }
-
-    function collectIdsFromObject(root, keys, maxDepth) {
-        const ids = new Set();
-        const seen = new WeakSet();
-        const queue = [{ value: root, depth: 0 }];
-        const keySet = new Set(keys);
-        while (queue.length && ids.size < 20) {
-            const current = queue.shift();
-            const value = current.value;
-            if (!value || typeof value !== 'object') continue;
-            if (value === window || value === document || value.nodeType) continue;
-            if (seen.has(value)) continue;
-            seen.add(value);
-            let names = [];
-            try { names = Reflect.ownKeys(value).filter((name) => typeof name === 'string'); } catch (e) { continue; }
-            names.forEach((name) => {
-                let child;
-                try { child = value[name]; } catch (e) { return; }
-                if (keySet.has(name)) {
-                    const id = normalizeId(child);
-                    if (id) ids.add(id);
-                }
-                if (current.depth < maxDepth && child && typeof child === 'object') {
-                    queue.push({ value: child, depth: current.depth + 1 });
-                }
-            });
-        }
-        return ids;
-    }
-
-    function vueObjectsFromNode(node) {
-        const objects = [];
-        let current = node;
-        let depth = 0;
-        while (current && current !== document.body && depth < 20) {
-            if (current.__vue__) {
-                objects.push(current.__vue__);
-                if (current.__vue__.$props) objects.push(current.__vue__.$props);
-                if (current.__vue__.$data) objects.push(current.__vue__.$data);
-            }
-            if (current.__vueParentComponent) {
-                objects.push(current.__vueParentComponent);
-                if (current.__vueParentComponent.props) objects.push(current.__vueParentComponent.props);
-                if (current.__vueParentComponent.data) objects.push(current.__vueParentComponent.data);
-                if (current.__vueParentComponent.setupState) objects.push(current.__vueParentComponent.setupState);
-                if (current.__vueParentComponent.ctx) objects.push(current.__vueParentComponent.ctx);
-            }
-            if (current.__vnode) {
-                objects.push(current.__vnode);
-                if (current.__vnode.props) objects.push(current.__vnode.props);
-            }
-            current = current.parentElement;
-            depth++;
-        }
-        return objects;
-    }
-
-    function idsFromVueNode(node, keys) {
-        const ids = new Set();
-        vueObjectsFromNode(node).forEach((obj) => {
-            collectIdsFromObject(obj, keys, 5).forEach((id) => ids.add(id));
-        });
-        return ids;
-    }
-
-    function isOwnMomentCard(card) {
-        const uid = currentUserId();
-        if (!uid || !card || !card.querySelectorAll) return false;
-        const attrs = ['userId', 'userid', 'uid', 'authorId', 'authorid', 'authorUid', 'authoruid', 'upId', 'upid'];
-        const attrMatched = [card].concat(Array.from(card.querySelectorAll('[data-user-id],[data-userid],[data-uid],[data-author-id],[data-authorid],[data-author-uid],[data-authoruid],[data-up-id],[data-upid]'))).some((node) => {
-            return attrs.some((name) => String(node.dataset && node.dataset[name] || '') === uid);
-        });
-        if (attrMatched) return true;
-        const links = Array.from(card.querySelectorAll('a[href*="/u/"],a[href*="/upPage/"],a[href*="acfun.cn/u/"],a[href*="acfun.cn/upPage/"]'));
-        if (links.some((link) => userIdFromUrl(link.href || link.getAttribute('href')) === uid)) return true;
-        const authorKeys = ['authorId', 'authorUid', 'ownerId', 'upId', 'userId', 'uid'];
-        return idsFromVueNode(card, authorKeys).has(uid);
-    }
-
-    function findNativeFeedMore(card) {
-        if (!card || !card.querySelector) return null;
-        return card.querySelector('.feed-more');
-    }
-
-    function findMomentCardFromFeedMore(more) {
-        let node = more && more.parentElement;
-        let depth = 0;
-        let fallback = null;
-        while (node && node !== document.body && depth < 30) {
-            if (node.nodeType === 1 && !node.closest('#amp-inline-host')) {
-                const ids = momentIdsInNode(node);
-                if (ids.size === 1) {
-                    return { card: node, momentId: Array.from(ids)[0] };
-                }
-                if (!fallback) {
-                    const vueMomentIds = idsFromVueNode(node, ['momentId', 'resourceId']);
-                    if (vueMomentIds.size === 1) {
-                        fallback = { card: node, momentId: Array.from(vueMomentIds)[0] };
-                    }
-                }
-                if (!fallback && depth >= 2) {
-                    const htmlIds = momentIdsInText(node.outerHTML);
-                    if (htmlIds.size === 1) {
-                        fallback = { card: node, momentId: Array.from(htmlIds)[0] };
-                    }
-                }
-            }
-            node = node.parentElement;
-            depth++;
-        }
-        return fallback;
-    }
-
-    function findMomentCardByGeometry(more) {
-        if (!more || !more.getBoundingClientRect) return null;
-        const moreRect = more.getBoundingClientRect();
-        const links = Array.from(document.querySelectorAll('a[href*="communityCircle/moment/"],[data-href*="communityCircle/moment/"],[data-url*="communityCircle/moment/"],[data-share-url*="communityCircle/moment/"]'))
-            .filter((link) => !link.closest('#amp-inline-host') && !link.closest('#amp-square-panel'));
-        let best = null;
-        links.forEach((link) => {
-            const momentId = momentIdFromUrl(momentUrlFromElement(link));
-            if (!momentId) return;
-            const card = findMomentCard(link, momentId);
-            if (!card || !card.getBoundingClientRect) return;
-            const rect = card.getBoundingClientRect();
-            if (rect.width < 180 || rect.height < 40) return;
-            const verticalOverlap = moreRect.bottom >= rect.top - 12 && moreRect.top <= rect.bottom + 12;
-            const horizontalNear = moreRect.left >= rect.left - 48 && moreRect.right <= rect.right + 96;
-            if (!verticalOverlap || !horizontalNear) return;
-            const score = Math.abs((moreRect.top + moreRect.bottom) / 2 - (rect.top + rect.bottom) / 2)
-                + Math.max(0, moreRect.left - rect.right)
-                + Math.max(0, rect.left - moreRect.right);
-            if (!best || score < best.score) best = { card: card, momentId: momentId, score: score };
-        });
-        return best && { card: best.card, momentId: best.momentId };
-    }
-
-    function findMomentCardFromCapturedData(more) {
-        const uid = currentUserId();
-        if (!more || !capturedFeedItems.length) return null;
-        const feedMores = Array.from(document.querySelectorAll('.feed-more'))
-            .filter((item) => !item.closest('#amp-inline-host') && !item.closest('#amp-square-panel') && item.querySelector('.ac-icon'));
-        const index = feedMores.indexOf(more);
-        const ownItems = uid ? capturedFeedItems.filter((item) => !item.userId || item.userId === uid) : capturedFeedItems.slice();
-        const source = ownItems.length ? ownItems : capturedFeedItems;
-        const data = source[index] || source[source.length - 1];
-        if (!data || !data.momentId) return null;
-        return { card: more.closest('[data-v-1a13993a]') || more.parentElement || more, momentId: data.momentId, userId: data.userId };
-    }
-
     function showGlobalMessage(type, textValue) {
         msg.className = type || '';
         msg.textContent = textValue || '';
     }
 
-    async function deleteFeedMoment(momentId, card, item) {
-        if (!momentId) return;
-        if (!window.confirm('确认删除动态 ' + momentId + '？')) return;
-        const oldText = item.textContent;
-        item.classList.add('disabled');
-        item.textContent = '删除中';
-        card.classList.add('amp-feed-deleting');
-        showGlobalMessage('info', '删除动态 ' + momentId + ' 中…');
-        try {
-            const at = await getAccessToken();
-            await deleteMoment(at, momentId);
-            card.remove();
-            showGlobalMessage('ok', '已删除动态 ' + momentId);
-        } catch (e) {
-            card.classList.remove('amp-feed-deleting');
-            showGlobalMessage('err', e.message);
-            window.alert(e.message);
-        } finally {
-            item.classList.remove('disabled');
-            item.textContent = oldText;
+    function showStatusMessage(type, textValue) {
+        if (inlineHost.parentNode) {
+            showGlobalMessage(type, textValue);
         }
     }
 
-    function injectNativeDeleteItem(more, card, momentId) {
-        const menu = more.querySelector('.feed-more-menu');
-        if (!menu || menu.querySelector('.amp-feed-delete')) return false;
-        const item = document.createElement('li');
-        item.className = 'amp-feed-delete';
-        item.textContent = '删除';
-        item.addEventListener('click', (ev) => {
+    async function deleteFeedMoment(momentId, card, item) {
+        if (!momentId) return;
+        if (!window.confirm('确认删除动态 ' + momentId + '？')) return;
+        const oldText = item && item.textContent;
+        let succeeded = false;
+        if (item) {
+            item.classList.add('disabled');
+            item.disabled = true;
+            item.textContent = '删除中';
+        }
+        if (card && card.classList) card.classList.add('amp-feed-deleting');
+        showStatusMessage('info', '删除动态 ' + momentId + ' 中…');
+        try {
+            const at = await getAccessToken();
+            await deleteMoment(at, momentId);
+            if (card && card.remove) card.remove();
+            succeeded = true;
+            showStatusMessage('ok', '已删除动态 ' + momentId);
+        } catch (e) {
+            if (card && card.classList) card.classList.remove('amp-feed-deleting');
+            showStatusMessage('err', e.message);
+            window.alert(e.message);
+        } finally {
+            if (item) {
+                item.classList.remove('disabled');
+                if (succeeded) {
+                    item.disabled = true;
+                    item.textContent = '已删除';
+                } else {
+                    item.disabled = false;
+                    item.textContent = oldText;
+                }
+            }
+        }
+    }
+
+    function isVisibleElement(el) {
+        if (!el || el.nodeType !== 1 || el.closest('#amp-inline-host')) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function isDetailActionRow(el) {
+        if (!isVisibleElement(el)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.height < 35 || rect.height > 70 || rect.width < 160 || rect.width > 520) return false;
+        const children = Array.from(el.children || []).filter(isVisibleElement);
+        if (children.length < 3 || children.length > 8) return false;
+        const textValue = String(el.textContent || '').replace(/\s+/g, '');
+        return /分享/.test(textValue) && (/\d/.test(textValue) || /(赞|评论|转发)/.test(textValue));
+    }
+
+    function findMomentDetailDeleteHost() {
+        const fixedHost = document.querySelector('.ac-moment .member-feed-interactive .feed-interactive, .ac-moment .feed-interactive, .member-feed-interactive .feed-interactive');
+        if (isVisibleElement(fixedHost)) return fixedHost;
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                if (!/分享/.test(node.nodeValue || '')) return NodeFilter.FILTER_REJECT;
+                if (node.parentElement && node.parentElement.closest('#amp-inline-host')) return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        });
+        let textNode = walker.nextNode();
+        while (textNode) {
+            let el = textNode.parentElement;
+            for (let depth = 0; el && el !== document.body && depth < 6; depth++, el = el.parentElement) {
+                if (isDetailActionRow(el)) return el;
+            }
+            textNode = walker.nextNode();
+        }
+        return null;
+    }
+
+    function mountMomentDetailDeleteButton() {
+        const momentId = detailMomentIdFromLocation();
+        if (!momentId || document.getElementById('amp-detail-delete')) return;
+        const host = findMomentDetailDeleteHost();
+        if (!host) return;
+        const button = document.createElement('button');
+        button.id = 'amp-detail-delete';
+        button.className = 'amp-detail-delete';
+        button.type = 'button';
+        button.textContent = '删除';
+        button.title = '删除这条动态';
+        button.addEventListener('click', (ev) => {
             ev.preventDefault();
             ev.stopPropagation();
-            if (item.classList.contains('disabled')) return;
-            deleteFeedMoment(momentId, card, item);
+            deleteFeedMoment(momentId, null, button);
         });
-        menu.appendChild(item);
-        more.dataset.ampDeleteState = 'injected';
-        return true;
+        host.appendChild(button);
     }
 
-    function scheduleInjectNativeDeleteItem(more, card, momentId) {
-        window.setTimeout(() => {
-            if (injectNativeDeleteItem(more, card, momentId)) return;
-            const observer = new MutationObserver(() => {
-                if (injectNativeDeleteItem(more, card, momentId)) observer.disconnect();
-            });
-            observer.observe(more, { childList: true, subtree: true });
-            window.setTimeout(() => observer.disconnect(), 1500);
-        }, 0);
-    }
-
-    function attachMomentDeleteMenu(card, momentId) {
-        if (!card || !momentId) return;
-        if (!isOwnMomentCard(card)) return;
-        const more = findNativeFeedMore(card);
-        if (!more) return;
-        if (more.dataset.ampMomentDeleteReady === momentId) return;
-        more.dataset.ampMomentDeleteReady = momentId;
-        more.dataset.ampDeleteState = 'bound';
-        more.addEventListener('click', (ev) => {
-            if (ev.target.closest('.amp-feed-delete')) return;
-            more.dataset.ampDeleteState = 'scheduled';
-            scheduleInjectNativeDeleteItem(more, card, momentId);
-        });
-    }
-
-    function scanMomentCards(root) {
-        const scope = root && root.querySelectorAll ? root : document;
-        scope.querySelectorAll('a[href*="communityCircle/moment/"],[data-href*="communityCircle/moment/"],[data-url*="communityCircle/moment/"],[data-share-url*="communityCircle/moment/"]').forEach((link) => {
-            if (link.closest('#amp-inline-host')) return;
-            if (link.closest('#amp-square-panel')) return;
-            const momentId = momentIdFromUrl(momentUrlFromElement(link));
-            if (!momentId) return;
-            const card = findMomentCard(link, momentId);
-            attachMomentDeleteMenu(card, momentId);
-        });
-    }
-
-    function scheduleScanMomentCards(root) {
-        window.clearTimeout(scheduleScanMomentCards.timer);
-        scheduleScanMomentCards.timer = window.setTimeout(() => scanMomentCards(root || document), 180);
+    function scheduleMountMomentDetailDeleteButton() {
+        if (!isMomentDetailPage()) return;
+        window.clearTimeout(scheduleMountMomentDetailDeleteButton.timer);
+        scheduleMountMomentDetailDeleteButton.timer = window.setTimeout(() => {
+            mountMomentDetailDeleteButton();
+            if (!document.getElementById('amp-detail-delete')) {
+                scheduleMountMomentDetailDeleteButton.tries = (scheduleMountMomentDetailDeleteButton.tries || 0) + 1;
+                if (scheduleMountMomentDetailDeleteButton.tries < 20) scheduleMountMomentDetailDeleteButton();
+            }
+        }, 250);
     }
 
     const text = panel.querySelector('#amp-text');
@@ -1149,10 +719,6 @@
     imagePreviewMask.innerHTML = '<img alt="图片预览">';
     const imagePreviewImg = imagePreviewMask.querySelector('img');
     const visibleInputs = Array.from(panel.querySelectorAll('input[name="amp-visible"]'));
-    const squareRefresh = squarePanel.querySelector('#amp-square-refresh');
-    const squareMore = squarePanel.querySelector('#amp-square-more');
-    const squareState = squarePanel.querySelector('#amp-square-state');
-    const squareList = squarePanel.querySelector('#amp-square-list');
 
     // 已选图片：{file, objectURL, width, height}
     let picked = [];
@@ -1161,111 +727,6 @@
     let emotionMap = readCachedEmotionMap();
     let activeEmotionPackageIndex = 0;
     let recentEmotionIds = readRecentEmotionIds();
-    let missingEmotionReloadTimer = null;
-    let missingEmotionReloading = false;
-    const missingEmotionReloadedIds = new Set();
-    let squarePcursor = '';
-    let squareLoading = false;
-
-    function setSquareState(textValue) {
-        squareState.textContent = textValue || '';
-        squareState.style.display = textValue ? 'block' : 'none';
-    }
-
-    function imageUrlFromCdnInfo(info) {
-        if (!info) return '';
-        if (info.cdnUrls && info.cdnUrls.length && info.cdnUrls[0].url) {
-            return normalizeImageUrl(info.cdnUrls[0].url);
-        }
-        return firstCdnUrl(info) || '';
-    }
-
-    function imageUrlFromMomentImage(image) {
-        if (!image) return '';
-        return normalizeImageUrl(
-            image.url
-            || image.expandedUrl
-            || image.originUrl
-            || image.thumbnailImageCdnUrl
-            || imageUrlFromCdnInfo(image.thumbnailImage)
-            || imageUrlFromCdnInfo(image.smallSharedImage)
-            || imageUrlFromCdnInfo(image.expandedImage)
-            || imageUrlFromCdnInfo(image.originImage)
-        );
-    }
-
-    function normalizeSquareFeedItem(item) {
-        const moment = item.moment || {};
-        const user = item.user || item.userInfo || moment.user || {};
-        const momentId = String(moment.momentId || item.resourceId || '');
-        const shareUrl = item.shareUrl || moment.shareUrl || (momentId ? 'https://m.acfun.cn/communityCircle/moment/' + momentId : '');
-        const imgs = []
-            .concat(moment.imgs || [])
-            .concat(moment.imgInfos || [])
-            .map(imageUrlFromMomentImage)
-            .filter(Boolean);
-        return {
-            momentId: momentId,
-            shareUrl: shareUrl,
-            userName: user.name || user.userName || 'AcFun 用户',
-            text: moment.text || item.discoveryResourceFeedShowContent || item.content || '',
-            createTime: moment.createTime || item.createTimeGroup || item.createTime || '',
-            likeCount: item.likeCount || moment.likeCount || 0,
-            commentCount: item.commentCount || moment.commentCount || 0,
-            shareCount: item.shareCount || moment.shareCount || 0,
-            imgs: imgs.slice(0, 9),
-        };
-    }
-
-    function renderSquareCard(feed) {
-        const data = normalizeSquareFeedItem(feed);
-        if (!data.momentId) return null;
-        const card = document.createElement('div');
-        card.className = 'amp-square-card';
-        const interactionUrl = data.shareUrl || ('https://m.acfun.cn/communityCircle/moment/' + data.momentId);
-        card.innerHTML = `
-            <a class="amp-square-link" href="${escapeHTML(data.shareUrl)}" target="_blank" rel="noopener">
-                <div class="amp-square-author">${escapeHTML(data.userName)}<span class="amp-square-time">${escapeHTML(data.createTime)}</span></div>
-                <div class="amp-square-text">${renderRichText(data.text || '发布了')}</div>
-            </a>
-            ${data.imgs.length ? '<div class="amp-square-imgs">' + data.imgs.map((url) => '<img src="' + escapeHTML(url) + '" loading="lazy" alt="">').join('') + '</div>' : ''}
-            <div class="amp-square-meta">
-                <a class="amp-square-action" href="${escapeHTML(interactionUrl)}" target="_blank" rel="noopener">赞 ${escapeHTML(data.likeCount)}</a>
-                <a class="amp-square-action" href="${escapeHTML(interactionUrl)}" target="_blank" rel="noopener">评论 ${escapeHTML(data.commentCount)}</a>
-                <a class="amp-square-action" href="${escapeHTML(interactionUrl)}" target="_blank" rel="noopener">转发 ${escapeHTML(data.shareCount)}</a>
-            </div>
-        `;
-        const textEl = card.querySelector('.amp-square-text');
-        if (textEl) textEl.dataset.rawText = data.text || '发布了';
-        return card;
-    }
-
-    async function loadSquareFeed(reset) {
-        if (squareLoading) return;
-        squareLoading = true;
-        squareRefresh.disabled = true;
-        squareMore.disabled = true;
-        setSquareState(reset ? '正在刷新广场动态…' : '正在加载更多…');
-        try {
-            const at = await getAccessToken();
-            const data = await fetchSquareFeed(at, reset ? '' : squarePcursor);
-            const feeds = data.feedList || [];
-            if (reset) squareList.innerHTML = '';
-            feeds.forEach((feed) => {
-                const card = renderSquareCard(feed);
-                if (card) squareList.appendChild(card);
-            });
-            squarePcursor = data.pcursor || '';
-            setSquareState(feeds.length ? '' : (reset ? '广场暂时没有动态' : '没有更多了'));
-            squareMore.disabled = !squarePcursor || squarePcursor === 'no_more';
-        } catch (e) {
-            setSquareState(e.message);
-            showGlobalMessage('err', e.message);
-        } finally {
-            squareLoading = false;
-            squareRefresh.disabled = false;
-        }
-    }
 
     function renderThumbs() {
         thumbs.innerHTML = '';
@@ -1375,63 +836,6 @@
         img.dataset.emotionId = emotion.id;
         img.contentEditable = 'false';
         insertNodeAtEditorCursor(img);
-    }
-
-    function renderRichText(value) {
-        const raw = String(value == null ? '' : value);
-        const re = /\[emot=acfun,(\d+)\/\]/g;
-        let html = '';
-        let last = 0;
-        let match;
-        while ((match = re.exec(raw))) {
-            html += escapeHTML(raw.slice(last, match.index));
-            const emotion = emotionMap[match[1]];
-            if (emotion && emotion.imageUrl) {
-                html += '<img class="amp-inline-emotion" src="' + escapeAttr(emotion.imageUrl) + '" alt="' + escapeAttr(emotion.name || '') + '" title="' + escapeAttr(emotion.name || match[1]) + '">';
-            } else {
-                scheduleMissingEmotionReload(match[1]);
-                html += escapeHTML(match[0]);
-            }
-            last = re.lastIndex;
-        }
-        html += escapeHTML(raw.slice(last));
-        return html;
-    }
-
-    function refreshRenderedEmotionText() {
-        squareList.querySelectorAll('.amp-square-text').forEach((el) => {
-            if (el.dataset.rawText != null) el.innerHTML = renderRichText(el.dataset.rawText);
-        });
-    }
-
-    function scheduleMissingEmotionReload(id) {
-        if (!id || missingEmotionReloadedIds.has(String(id))) return;
-        missingEmotionReloadedIds.add(String(id));
-        window.clearTimeout(missingEmotionReloadTimer);
-        missingEmotionReloadTimer = window.setTimeout(reloadMissingEmotions, 120);
-    }
-
-    async function reloadMissingEmotions() {
-        if (missingEmotionReloading) return;
-        missingEmotionReloading = true;
-        try {
-            if (emotionLoading) {
-                try { await emotionLoading; } catch (e) { /* 后面强制刷新兜底 */ }
-            }
-            emotionLoading = loadEmotionPackages(true)
-                .then((packages) => {
-                    emotionPackages = packages;
-                    emotionMap = emotionMapFromPackages(packages);
-                    refreshRenderedEmotionText();
-                    return packages;
-                })
-                .finally(() => { emotionLoading = null; });
-            await emotionLoading;
-        } catch (e) {
-            /* 表情强刷失败时保留原文本，不阻断广场和发布器 */
-        } finally {
-            missingEmotionReloading = false;
-        }
     }
 
     function setEmojiState(textValue) {
@@ -1564,25 +968,12 @@
                     emotionPackages = packages;
                     emotionMap = emotionMapFromPackages(packages);
                     activeEmotionPackageIndex = 0;
-                    refreshRenderedEmotionText();
                     return packages;
                 })
                 .finally(() => { emotionLoading = null; });
         }
         await emotionLoading;
         renderEmojiPanel();
-    }
-
-    function ensureEmotionMapForDisplay() {
-        if (Object.keys(emotionMap).length || emotionLoading) return;
-        emotionLoading = loadEmotionPackages(false)
-            .then((packages) => {
-                emotionPackages = packages;
-                emotionMap = emotionMapFromPackages(packages);
-                refreshRenderedEmotionText();
-                return packages;
-            })
-            .finally(() => { emotionLoading = null; });
     }
 
     fileInput.addEventListener('change', async () => {
@@ -1600,7 +991,6 @@
 
     renderThumbs();
     updateCount();
-    setSquareState('点击刷新查看广场动态');
 
     function closeComposerModal() {
         setComposerOpen(false);
@@ -1617,8 +1007,6 @@
         const plain = (ev.clipboardData || window.clipboardData).getData('text/plain') || '';
         insertNodeAtEditorCursor(document.createTextNode(plain));
     });
-    squareRefresh.addEventListener('click', () => loadSquareFeed(true));
-    squareMore.addEventListener('click', () => loadSquareFeed(false));
     thumbs.addEventListener('click', (ev) => {
         const img = ev.target.closest('.amp-thumb img');
         if (!img) return;
@@ -1639,8 +1027,6 @@
             setEmojiState(e.message || '表情加载失败');
         }
     });
-
-    ensureEmotionMapForDisplay();
 
     emojiPackageButton.addEventListener('click', (ev) => {
         ev.stopPropagation();
@@ -1686,32 +1072,6 @@
 
     document.addEventListener('click', (ev) => {
         if (!ev.target.closest('#amp-emoji-head')) closeEmojiPackagePopover();
-        const more = ev.target.closest('.feed-more');
-        if (more && !more.closest('#amp-inline-host') && !more.closest('#amp-square-panel')) {
-            let found = findMomentCardFromFeedMore(more);
-            if (!found) {
-                more.dataset.ampDeleteState = 'no-card-dom';
-                found = findMomentCardByGeometry(more);
-            }
-            if (!found) {
-                more.dataset.ampDeleteState = 'no-card-geometry';
-                found = findMomentCardFromCapturedData(more);
-            }
-            if (!found) {
-                more.dataset.ampDeleteState = 'no-card-captured';
-                return;
-            }
-            if (found.userId && currentUserId() && found.userId !== currentUserId()) {
-                more.dataset.ampDeleteState = 'not-own-captured';
-                return;
-            }
-            if (!found.userId && !isOwnMomentCard(found.card)) {
-                more.dataset.ampDeleteState = 'not-own';
-                return;
-            }
-            more.dataset.ampDeleteState = 'scheduled';
-            scheduleInjectNativeDeleteItem(more, found.card, found.momentId);
-        }
     }, true);
     document.addEventListener('keydown', (ev) => {
         if (ev.key === 'Escape' && imagePreviewMask.classList.contains('show')) {
@@ -1728,20 +1088,11 @@
             window.setTimeout(startWhenBodyReady, 30);
             return;
         }
+        if (isMomentDetailPage()) {
+            scheduleMountMomentDetailDeleteButton();
+            return;
+        }
         mountFloatingComposer();
-        mountSquarePanelForPage();
-        scanMomentCards(document);
-        const feedObserver = new MutationObserver((mutations) => {
-            for (let i = 0; i < mutations.length; i++) {
-                if (mutations[i].addedNodes && mutations[i].addedNodes.length) {
-                    scheduleScanMomentCards(document);
-                    scheduleMountMemberSquareEntry();
-                    return;
-                }
-            }
-        });
-        feedObserver.observe(document.body, { childList: true, subtree: true });
-        if (!isMemberPage()) window.setTimeout(() => loadSquareFeed(true), 300);
     }
     startWhenBodyReady();
 
@@ -1774,7 +1125,6 @@
             msg.textContent = published && published.moment && published.moment.momentId
                 ? '发布成功！动态 ID：' + published.moment.momentId
                 : '发布成功！';
-            scheduleScanMomentCards(document);
             text.innerHTML = '';
             closeComposerModal();
             const publicVisible = visibleInputs.find((input) => input.value === 'public');
@@ -1783,6 +1133,9 @@
             picked.forEach((p) => URL.revokeObjectURL(p.objectURL));
             picked = [];
             renderThumbs();
+            send.disabled = false;
+            send.textContent = '发布';
+            window.location.reload();
         } catch (e) {
             msg.className = 'err';
             msg.textContent = e.message;
