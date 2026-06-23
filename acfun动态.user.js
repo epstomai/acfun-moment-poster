@@ -7,8 +7,6 @@
 // @match        https://www.acfun.cn/member
 // @match        https://www.acfun.cn/member/*
 // @match        https://www.acfun.cn/moment/am*
-// @updateURL    http://127.0.0.1:8787/acfun%E5%8A%A8%E6%80%81.user.js
-// @downloadURL  http://127.0.0.1:8787/acfun%E5%8A%A8%E6%80%81.user.js
 // @run-at       document-start
 // @grant        GM_xmlhttpRequest
 // @grant        GM_addStyle
