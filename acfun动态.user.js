@@ -4,6 +4,7 @@
 // @version      0.8.39
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
+// @license      MIT
 // @match        https://www.acfun.cn/member
 // @match        https://www.acfun.cn/member/*
 // @match        https://www.acfun.cn/moment/am*
