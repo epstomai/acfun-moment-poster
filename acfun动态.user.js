@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.39
+// @version      0.8.40
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @license      MIT
@@ -19,6 +19,7 @@
 // @connect      imgs.aixifan.com
 // @connect      acfun.cn
 // @connect      www.acfun.cn
+// @connect      *
 // ==/UserScript==
 
 (function () {
@@ -268,6 +269,75 @@
             img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('图片读取失败')); };
             img.src = url;
         });
+    }
+
+    function fileFromBlob(blob, name) {
+        if (blob instanceof File && blob.name) return blob;
+        const type = blob.type || 'image/png';
+        const ext = (type.split('/')[1] || 'png').replace('jpeg', 'jpg');
+        return new File([blob], name || ('paste-' + Date.now() + '.' + ext), { type: type });
+    }
+
+    function isHttpUrl(str) {
+        const s = String(str || '').trim();
+        return /^https?:\/\//i.test(s) || /^\/\//.test(s);
+    }
+
+    function looksLikeImageUrl(str) {
+        const s = String(str || '').trim();
+        if (!isHttpUrl(s)) return false;
+        try {
+            const url = new URL(s.startsWith('//') ? location.protocol + s : s);
+            const target = (url.pathname + url.search).toLowerCase();
+            if (/\.(jpe?g|png|gif|webp|bmp|avif|heic|heif)(?:$|[?#])/i.test(target)) return true;
+            return /\/(?:image|img|photo|pic|avatar|cover|thumb)/i.test(url.pathname)
+                || /imgs\.aixifan\.com|acfun\.cn|kwimgs|kuaishouzt/i.test(url.hostname);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function clipboardImageFile(clipboardData) {
+        const items = clipboardData && clipboardData.items;
+        if (!items) return null;
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            if (item.kind === 'file' && /^image\//i.test(item.type)) {
+                const blob = item.getAsFile();
+                if (blob) return fileFromBlob(blob);
+            }
+        }
+        return null;
+    }
+
+    function parseResponseContentType(responseHeaders) {
+        const m = String(responseHeaders || '').match(/content-type:\s*([^\r\n;]+)/i);
+        return m ? m[1].trim().toLowerCase() : '';
+    }
+
+    async function fetchImageAsFile(url) {
+        const normalizedUrl = normalizeImageUrl(String(url || '').trim());
+        const r = await gm({
+            method: 'GET',
+            url: normalizedUrl,
+            responseType: 'arraybuffer',
+            timeout: 60000,
+        });
+        if (r.status < 200 || r.status >= 300) {
+            throw new Error('图片下载失败（HTTP ' + r.status + '）');
+        }
+        const contentType = parseResponseContentType(r.responseHeaders);
+        if (!contentType.startsWith('image/')) {
+            throw new Error('链接不是图片（Content-Type: ' + (contentType || '未知') + '）');
+        }
+        const ext = (contentType.split('/')[1] || 'jpg').replace('jpeg', 'jpg').split('+')[0];
+        let filename = 'remote-image.' + ext;
+        try {
+            const path = new URL(normalizedUrl).pathname;
+            const base = path.split('/').pop();
+            if (base && /\.(jpe?g|png|gif|webp|bmp|avif)$/i.test(base)) filename = base;
+        } catch (e) { /* 使用默认文件名 */ }
+        return fileFromBlob(new Blob([r.response], { type: contentType }), filename);
     }
 
     function fileToArrayBuffer(file) {
@@ -727,6 +797,59 @@
     let activeEmotionPackageIndex = 0;
     let recentEmotionIds = readRecentEmotionIds();
 
+    async function addPickedFromFile(file, options) {
+        if (picked.length >= MAX_IMGS) {
+            if (!options || !options.silent) showGlobalMessage('err', '最多只能添加 ' + MAX_IMGS + ' 张图片');
+            return false;
+        }
+        try {
+            const meta = await readImageMeta(file);
+            picked.push({ file: file, objectURL: meta.objectURL, width: meta.width, height: meta.height });
+            renderThumbs();
+            return true;
+        } catch (e) {
+            if (!options || !options.silent) showGlobalMessage('err', e.message || '图片读取失败');
+            return false;
+        }
+    }
+
+    async function addPickedFromUrl(url) {
+        showGlobalMessage('info', '正在获取图片…');
+        try {
+            const file = await fetchImageAsFile(url);
+            const ok = await addPickedFromFile(file);
+            if (ok) showGlobalMessage('ok', '已添加图片');
+            return ok;
+        } catch (e) {
+            showGlobalMessage('err', e.message || '获取图片失败');
+            return false;
+        }
+    }
+
+    async function handleImagePaste(ev) {
+        const clipboardData = ev.clipboardData || window.clipboardData;
+        if (!clipboardData) return false;
+
+        const imageFile = clipboardImageFile(clipboardData);
+        if (imageFile) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const ok = await addPickedFromFile(imageFile);
+            if (ok) showGlobalMessage('ok', '已粘贴图片');
+            return true;
+        }
+
+        const plain = (clipboardData.getData('text/plain') || '').trim();
+        if (plain && looksLikeImageUrl(plain)) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            await addPickedFromUrl(plain);
+            return true;
+        }
+
+        return false;
+    }
+
     function renderThumbs() {
         thumbs.innerHTML = '';
         picked.forEach((p, idx) => {
@@ -739,7 +862,8 @@
             const add = document.createElement('div');
             add.className = 'amp-add-img';
             add.textContent = '＋';
-            add.title = '添加图片';
+            add.title = '添加图片（文件 / 粘贴图片 / 粘贴图片链接）';
+            add.tabIndex = 0;
             add.addEventListener('click', () => fileInput.click());
             thumbs.appendChild(add);
         }
@@ -980,12 +1104,8 @@
         fileInput.value = '';
         for (const f of files) {
             if (picked.length >= MAX_IMGS) break;
-            try {
-                const meta = await readImageMeta(f);
-                picked.push({ file: f, objectURL: meta.objectURL, width: meta.width, height: meta.height });
-            } catch (e) { /* 跳过坏图 */ }
+            await addPickedFromFile(f, { silent: true });
         }
-        renderThumbs();
     });
 
     renderThumbs();
@@ -1001,10 +1121,16 @@
     floatToggle.addEventListener('click', () => setComposerOpen(true));
     modalMask.addEventListener('click', closeComposerModal);
     text.addEventListener('input', updateCount);
-    text.addEventListener('paste', (ev) => {
+    text.addEventListener('paste', async (ev) => {
+        if (await handleImagePaste(ev)) return;
         ev.preventDefault();
         const plain = (ev.clipboardData || window.clipboardData).getData('text/plain') || '';
         insertNodeAtEditorCursor(document.createTextNode(plain));
+    });
+    document.addEventListener('paste', async (ev) => {
+        if (!inlineHost.classList.contains('amp-open')) return;
+        if (ev.target === text || (ev.target.closest && ev.target.closest('#amp-text'))) return;
+        await handleImagePaste(ev);
     });
     thumbs.addEventListener('click', (ev) => {
         const img = ev.target.closest('.amp-thumb img');
