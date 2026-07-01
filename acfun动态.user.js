@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         acfun动态
 // @namespace    acfun-moment-poster
-// @version      0.8.40
+// @version      0.8.42
 // @description  在 AcFun 网页端发布动态（文字 + 图片 + 表情 + 可见范围）。AcFun 官方仅手机 App 可发，本脚本通过 web 登录态换取 app token 调用 moment/add 接口实现网页发布。
 // @author       you
 // @license      MIT
@@ -51,6 +51,10 @@
     const DELETE_MOMENT_URL = API_BASE + '/rest/app/moment/delete';
     const IMG_GET_TOKEN_URL = API_BASE + '/rest/app/image/upload/getToken';
     const IMG_GET_URL_URL = API_BASE + '/rest/app/image/upload/getUrlAfterUpload';
+    const PC_IMG_GET_TOKEN_URL = 'https://www.acfun.cn/rest/pc-direct/image/upload/getToken';
+    const PC_IMG_GET_URL_URL = 'https://www.acfun.cn/rest/pc-direct/image/upload/getUrlAfterUpload';
+    const COMMENT_IMG_BIZ_FLAG = 'web-comment-text';
+    const KS_FRAGMENT_BYTES = 1024 * 1024;
     const EMOTION_URL = 'https://www.acfun.cn/rest/pc-direct/emotion/getUserEmotion';
     const KS_FRAGMENT_URL = 'https://upload.kuaishouzt.com/api/upload/fragment';
     const KS_COMPLETE_URL = 'https://upload.kuaishouzt.com/api/upload/complete';
@@ -108,6 +112,10 @@
         }).toString();
     }
 
+    function pageWin() {
+        return typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+    }
+
     function gm(opts) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -122,6 +130,21 @@
                 ontimeout: () => reject(new Error('请求超时')),
                 timeout: opts.timeout || 30000,
             });
+        });
+    }
+
+    function gmWeb(opts) {
+        return pageWin().fetch(opts.url, {
+            method: opts.method || 'GET',
+            headers: opts.headers || {},
+            body: opts.data,
+            credentials: 'include',
+        }).then(async (r) => {
+            const responseText = await r.text();
+            if (r.status < 200 || r.status >= 300) {
+                throw new Error((opts.label || '请求') + '失败（HTTP ' + r.status + '）');
+            }
+            return { status: r.status, responseText: responseText };
         });
     }
 
@@ -390,6 +413,59 @@
         return { url: ur.url, width: meta.width || 0, height: meta.height || 0 };
     }
 
+    async function uploadKsImageBytes(uploadToken, file) {
+        const buf = await fileToArrayBuffer(file);
+        const chunkSize = KS_FRAGMENT_BYTES;
+        const fragmentCount = Math.max(1, Math.ceil(buf.byteLength / chunkSize));
+        for (let i = 0; i < fragmentCount; i++) {
+            const start = i * chunkSize;
+            const part = buf.slice(start, Math.min(start + chunkSize, buf.byteLength));
+            const fr = parseJSON(await gm({
+                method: 'POST',
+                url: KS_FRAGMENT_URL + '?upload_token=' + encodeURIComponent(uploadToken) + '&fragment_id=' + i,
+                headers: { 'Content-Type': 'application/octet-stream' },
+                data: part, binary: true,
+            }), 'fragment');
+            if (fr.result !== 1) throw new Error('图片字节上传失败(' + fr.result + ')');
+        }
+        const cr = parseJSON(await gm({
+            method: 'POST',
+            url: KS_COMPLETE_URL + '?fragment_count=' + fragmentCount + '&upload_token=' + encodeURIComponent(uploadToken),
+        }), 'complete');
+        if (cr.result !== 1) throw new Error('图片合并失败(' + cr.result + ')');
+    }
+
+    // 评论图片走网页端上传，返回 preview 域名地址，提交格式为 [img=图片]URL[/img]
+    async function uploadCommentImage(file) {
+        const fileName = file.name || ('paste-' + Date.now() + '.png');
+        const gt = parseJSON(await gmWeb({
+            method: 'POST',
+            url: PC_IMG_GET_TOKEN_URL,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            data: 'fileName=' + encodeURIComponent(fileName),
+            label: '评论图片 token',
+        }), '评论图片 getToken');
+        if (gt.result !== 0) {
+            throw new Error('取评论图片 token 失败(' + gt.result + ')：' + (gt.error_msg || '请确认已登录 AcFun'));
+        }
+        let info = gt.info;
+        if (typeof info === 'string') info = JSON.parse(info);
+        const ut = info && info.token;
+        if (!ut) throw new Error('评论图片上传 token 缺失');
+
+        await uploadKsImageBytes(ut, file);
+
+        const ur = parseJSON(await gmWeb({
+            method: 'POST',
+            url: PC_IMG_GET_URL_URL,
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            data: 'token=' + encodeURIComponent(ut) + '&bizFlag=' + encodeURIComponent(COMMENT_IMG_BIZ_FLAG),
+            label: '评论图片地址',
+        }), '评论图片 getUrl');
+        if (ur.result !== 0 || !ur.url) throw new Error('获取评论图片地址失败(' + ur.result + ')');
+        return normalizeImageUrl(ur.url);
+    }
+
     function appHeaders(at) {
         const uid = getCookie('auth_key') || getCookie('userId') || '';
         const did = getCookie('_did') || uuid();
@@ -535,6 +611,13 @@
         #amp-send:disabled{background:#f7a9b1;cursor:not-allowed;}
         #amp-msg{margin-top:8px;font-size:12px;min-height:16px;}
         #amp-msg.ok{color:#23a35a;} #amp-msg.err{color:#fd4c5d;} #amp-msg.info{color:#888;}
+        #amp-toast{display:none;position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:10002;
+            max-width:calc(100vw - 32px);padding:8px 14px;border-radius:8px;background:rgba(34,34,34,.92);color:#fff;
+            font-size:13px;line-height:1.45;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.18);pointer-events:none;}
+        #amp-toast.show{display:block;}
+        #amp-toast.ok{background:rgba(35,163,90,.94);}
+        #amp-toast.err{background:rgba(253,76,93,.94);}
+        #amp-toast.info{background:rgba(68,68,68,.94);}
         @media (max-width:640px){
             #amp-inline-host{right:12px;bottom:12px;max-width:calc(100vw - 24px);}
             #amp-panel{width:calc(100vw - 24px);padding:12px;}
@@ -848,6 +931,130 @@
         }
 
         return false;
+    }
+
+    const COMMENT_MAX_IMGS = 1;
+    const commentUploading = new WeakSet();
+
+    function showAmpToast(type, textValue) {
+        let toast = document.getElementById('amp-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'amp-toast';
+            document.body.appendChild(toast);
+        }
+        toast.className = type || '';
+        toast.textContent = textValue || '';
+        toast.classList.add('show');
+        window.clearTimeout(showAmpToast.timer);
+        showAmpToast.timer = window.setTimeout(() => toast.classList.remove('show'), 2800);
+    }
+
+    function resolveDynamicCommentEditor(el) {
+        if (!el || el.nodeType !== 1 || el.closest('#amp-inline-host')) return null;
+        const editor = el.matches('.edui-body-container[contenteditable="true"]')
+            ? el
+            : (el.closest && el.closest('.edui-body-container[contenteditable="true"]'));
+        if (!editor) return null;
+        const root = editor.closest('.edui-container');
+        return root && root.querySelector('.btn-send-comment') ? editor : null;
+    }
+
+    function resolveCommentUmEditor(editorEl) {
+        if (!editorEl || !editorEl.id) return null;
+        const um = pageWin().UM;
+        if (!um || typeof um.getEditor !== 'function') return null;
+        return um.getEditor(editorEl.id) || null;
+    }
+
+    function countCommentEditorImages(editor) {
+        if (!editor) return 0;
+        return Array.from(editor.querySelectorAll('img')).filter((img) => img.getAttribute('data-type') !== 'emot').length;
+    }
+
+    function insertNodeAtCommentCursor(editor, node) {
+        editor.focus();
+        const sel = window.getSelection();
+        let range = sel && sel.rangeCount ? sel.getRangeAt(0) : null;
+        if (!range || !editor.contains(range.commonAncestorContainer)) {
+            range = document.createRange();
+            range.selectNodeContents(editor);
+            range.collapse(false);
+        }
+        range.deleteContents();
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.setEndAfter(node);
+        if (sel) {
+            sel.removeAllRanges();
+            sel.addRange(range);
+        }
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    function insertCommentImage(editor, url) {
+        const previewUrl = normalizeImageUrl(url);
+        const umEditor = resolveCommentUmEditor(editor);
+        if (umEditor && typeof umEditor.execCommand === 'function') {
+            umEditor.execCommand('insertimage', { src: previewUrl });
+            return;
+        }
+        const img = document.createElement('img');
+        img.src = previewUrl;
+        img.className = 'ubb-emotion';
+        img.setAttribute('data-width', '0');
+        img.setAttribute('data-height', '0');
+        img.setAttribute('data-type', 'pic');
+        img.contentEditable = 'false';
+        insertNodeAtCommentCursor(editor, img);
+    }
+
+    async function handleCommentImagePaste(ev) {
+        const editor = resolveDynamicCommentEditor(ev.target);
+        if (!editor) return false;
+
+        const clipboardData = ev.clipboardData || window.clipboardData;
+        if (!clipboardData) return false;
+
+        const imageFile = clipboardImageFile(clipboardData);
+        const plain = (clipboardData.getData('text/plain') || '').trim();
+        const imageUrl = plain && looksLikeImageUrl(plain) ? plain : '';
+        if (!imageFile && !imageUrl) return false;
+
+        ev.preventDefault();
+        ev.stopPropagation();
+
+        if (countCommentEditorImages(editor) >= COMMENT_MAX_IMGS) {
+            showAmpToast('err', '评论最多插入 ' + COMMENT_MAX_IMGS + ' 张图片');
+            return true;
+        }
+        if (commentUploading.has(editor)) {
+            showAmpToast('info', '图片上传中，请稍候…');
+            return true;
+        }
+
+        commentUploading.add(editor);
+        showAmpToast('info', '图片上传中…');
+        try {
+            const file = imageFile || await fetchImageAsFile(imageUrl);
+            const previewUrl = await uploadCommentImage(file);
+            insertCommentImage(editor, previewUrl);
+            showAmpToast('ok', '已粘贴图片');
+        } catch (e) {
+            showAmpToast('err', e.message || '图片上传失败');
+        } finally {
+            commentUploading.delete(editor);
+        }
+        return true;
+    }
+
+    let commentPasteInited = false;
+    function initCommentImagePaste() {
+        if (commentPasteInited) return;
+        commentPasteInited = true;
+        document.addEventListener('paste', (ev) => {
+            handleCommentImagePaste(ev);
+        }, true);
     }
 
     function renderThumbs() {
@@ -1213,6 +1420,7 @@
             window.setTimeout(startWhenBodyReady, 30);
             return;
         }
+        initCommentImagePaste();
         if (isMomentDetailPage()) {
             scheduleMountMomentDetailDeleteButton();
             return;
